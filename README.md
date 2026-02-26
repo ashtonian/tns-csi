@@ -205,6 +205,7 @@ The driver is configured via command-line flags and Kubernetes secrets:
 - `--driver-name` - CSI driver name (default: `tns.csi.io`)
 - `--api-url` - TrueNAS API URL (e.g., `ws://YOUR-TRUENAS-IP/api/v2.0/websocket`)
 - `--api-key` - TrueNAS API key
+- `--enable-nvme-discovery` - Run `nvme discover` before connecting (default: `false`, not needed for standard setups)
 
 ### Storage Class Parameters
 

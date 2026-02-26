@@ -610,6 +610,7 @@ kubectl logs -n kube-system tns-csi-node-xxxxx -c tns-csi-plugin
    - Check firewall allows port 4420 (default NVMe-oF TCP port)
    - Test connectivity: `sudo nvme discover -t tcp -a YOUR-TRUENAS-IP -s 4420`
    - Check node plugin logs for detailed error messages
+   - Note: The driver skips `nvme discover` by default since all connection parameters are known from the volume context. Enable with `node.enableNVMeDiscovery: true` if you need discovery for multi-path or dynamic topologies
 
 6. **NVMe device not appearing**
    - Wait a few seconds for device discovery

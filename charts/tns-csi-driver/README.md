@@ -286,6 +286,7 @@ Detached snapshots use `zfs send/receive` to create independent dataset copies t
 | `node.kubeletPath` | Kubelet data directory | `/var/lib/kubelet` |
 | `node.logLevel` | Log verbosity (0-5) | `2` |
 | `node.debug` | Enable debug mode | `false` |
+| `node.enableNVMeDiscovery` | Run `nvme discover` before `nvme connect` | `false` |
 | `node.resources.limits.cpu` | CPU limit | `200m` |
 | `node.resources.limits.memory` | Memory limit | `200Mi` |
 | `node.resources.requests.cpu` | CPU request | `10m` |
