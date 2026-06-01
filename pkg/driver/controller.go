@@ -50,9 +50,15 @@ const (
 	VolumeContextKeySMBShareID        = "smbShareID"
 	VolumeContextKeyExpectedCapacity  = "expectedCapacity"
 	VolumeContextKeyClonedFromSnap    = "clonedFromSnapshot"
+	VolumeContextKeyAutoRepair        = "recovery.autoRepair"
 	VolumeContextValueTrue            = "true"
 	VolumeContextValueFalse           = "false"
 )
+
+// StorageClassParamAutoRepair is the StorageClass parameter that opts a volume
+// in/out of filesystem auto-recovery. Its value is surfaced into the volume
+// context as VolumeContextKeyAutoRepair so the node sees it at stage time.
+const StorageClassParamAutoRepair = "recovery.autoRepair"
 
 // Static errors for controller operations.
 var (
@@ -556,7 +562,17 @@ func (s *ControllerService) tryPromoteAndDeleteDataset(ctx context.Context, data
 }
 
 // CreateVolume creates a new volume.
-func (s *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+func (s *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (resp *csi.CreateVolumeResponse, retErr error) {
+	// On every successful response path — new, cloned, snapshot-restored, adopted,
+	// or idempotent — surface recovery-related StorageClass parameters into the
+	// volume context so per-volume recovery policy reaches the node regardless of
+	// how the volume was created.
+	defer func() {
+		if retErr == nil && resp.GetVolume() != nil {
+			applyRecoveryParams(resp.GetVolume().GetVolumeContext(), req.GetParameters())
+		}
+	}()
+
 	// Log at Info level (not V(4)) so we can see when CreateVolume is called in CI
 	klog.Infof("=== CreateVolume CALLED === Name: %s", req.GetName())
 	if req.GetVolumeContentSource() != nil {
@@ -738,6 +754,19 @@ func (s *ControllerService) handleVolumeContentSource(ctx context.Context, req *
 
 	klog.Warningf("VolumeContentSource exists but both snapshot and volume are nil for volume %s", req.GetName())
 	return nil, false, nil
+}
+
+// applyRecoveryParams surfaces recovery-related StorageClass parameters into the
+// volume context so the node plugin sees per-volume policy at stage time without
+// an extra API call. Only meaningful for block protocols (the node ignores it
+// for NFS/SMB), but harmless to carry everywhere.
+func applyRecoveryParams(volumeContext, params map[string]string) {
+	if volumeContext == nil {
+		return
+	}
+	if v := params[StorageClassParamAutoRepair]; v != "" {
+		volumeContext[VolumeContextKeyAutoRepair] = v
+	}
 }
 
 // createVolumeByProtocol creates a volume using the specified protocol.

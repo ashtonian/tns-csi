@@ -102,6 +102,25 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  {{- if ne (.Values.recovery.mode | default "off") "off" }}
+  # Filesystem auto-recovery (docs/RFC-AUTO-RECOVERY.md): the node plugin resolves
+  # a shut-down volume's PVC and evicts its consumer so the kubelet reschedules.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
 
 ---
 apiVersion: {{ include "tns-csi-driver.rbac.apiVersion" . }}

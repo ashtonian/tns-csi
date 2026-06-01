@@ -21,33 +21,35 @@ import (
 
 // Config contains the configuration for the driver.
 type Config struct {
-	DriverName                string
-	Version                   string
+	MetricsAddr               string
+	DashboardAddr             string
 	NodeID                    string
 	Endpoint                  string
 	APIURL                    string
 	APIKey                    string
-	MetricsAddr               string // Address to expose Prometheus metrics (e.g., ":8080")
-	DashboardAddr             string // Address for in-cluster dashboard (e.g., ":9090", empty = disabled)
-	DashboardPool             string // ZFS pool for unmanaged volume discovery in dashboard
-	ClusterID                 string // Unique identifier for this cluster (for multi-cluster TrueNAS sharing)
-	TestMode                  bool   // Enable test mode for sanity tests (skips actual mounts)
-	SkipTLSVerify             bool   // Skip TLS certificate verification (for self-signed certs)
-	EnableNVMeDiscovery       bool   // Run nvme discover before nvme connect (default: false)
-	MaxConcurrentNVMeConnects int    // Max concurrent NVMe-oF connect operations per node (default: 5)
+	Version                   string
+	DashboardPool             string
+	DriverName                string
+	ClusterID                 string
+	Recovery                  RecoveryConfig
+	MaxConcurrentNVMeConnects int
+	TestMode                  bool
+	SkipTLSVerify             bool
+	EnableNVMeDiscovery       bool
 }
 
 // Driver is the TNS CSI driver.
 type Driver struct {
-	srv          *grpc.Server
-	metricsSrv   *http.Server
-	dashboardSrv *dashboard.Server
-	apiClient    tnsapi.ClientInterface
-	controller   *ControllerService
-	node         *NodeService
-	identity     *IdentityService
-	config       Config
-	testMode     bool // Test mode flag for sanity tests
+	apiClient      tnsapi.ClientInterface
+	srv            *grpc.Server
+	metricsSrv     *http.Server
+	dashboardSrv   *dashboard.Server
+	controller     *ControllerService
+	node           *NodeService
+	identity       *IdentityService
+	recoveryCancel context.CancelFunc
+	config         Config
+	testMode       bool
 }
 
 // NewDriver creates a new driver instance.
@@ -82,6 +84,14 @@ func NewDriverWithClient(cfg Config, client tnsapi.ClientInterface) (*Driver, er
 	d.identity = NewIdentityService(cfg.DriverName, cfg.Version)
 	d.controller = NewControllerService(client, nodeRegistry, cfg.ClusterID)
 	d.node = NewNodeService(cfg.NodeID, client, cfg.TestMode, nodeRegistry, cfg.EnableNVMeDiscovery, cfg.MaxConcurrentNVMeConnects)
+
+	// Wire filesystem auto-recovery (dormant unless explicitly enabled via config).
+	d.node.recovery = cfg.Recovery
+	if cfg.Recovery.Enabled() {
+		d.node.tracker = newMountTracker(defaultMountTrackerStatePath)
+		d.node.kube = newNodeKubeClient(cfg.NodeID)
+		d.node.breaker = newCircuitBreaker(cfg.Recovery.RetryWindow, cfg.Recovery.MaxRetries)
+	}
 
 	return d, nil
 }
@@ -154,6 +164,15 @@ func (d *Driver) Run() error {
 	csi.RegisterControllerServer(d.srv, d.controller)
 	csi.RegisterNodeServer(d.srv, d.node)
 
+	// Start the node-side filesystem-recovery reconciler (out-of-band; only when
+	// recovery is enabled). It reacts to kernel shutdown events and stale mounts
+	// that the request-driven CSI API never surfaces.
+	if d.node.recovery.Enabled() {
+		recoveryCtx, cancel := context.WithCancel(context.Background())
+		d.recoveryCancel = cancel
+		go newRecoveryReconciler(d.node).run(recoveryCtx)
+	}
+
 	klog.Info("TNS CSI Driver is ready")
 	return d.srv.Serve(listener)
 }
@@ -161,6 +180,11 @@ func (d *Driver) Run() error {
 // Stop stops the driver.
 func (d *Driver) Stop() {
 	klog.Info("Stopping TNS CSI Driver")
+
+	// Stop the recovery reconciler
+	if d.recoveryCancel != nil {
+		d.recoveryCancel()
+	}
 
 	// Stop dashboard server
 	if d.dashboardSrv != nil {

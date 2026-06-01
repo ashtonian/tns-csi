@@ -641,3 +641,40 @@ grafana:
       grafana_dashboard: "1"
     # Additional annotations for the ConfigMap
     annotations: {}
+
+# Filesystem auto-recovery for block volumes (NVMe-oF, iSCSI).
+# Recovers transport-induced filesystem shutdowns (XFS SHUTDOWN_CORRUPT_INCORE,
+# ext4 aborted-journal) on the node, without any new path into TrueNAS.
+# All defaults are off/safe — the driver behaves identically with recovery off.
+# See docs/RFC-AUTO-RECOVERY.md. Enabling mode!=off also grants the node
+# ServiceAccount pod-eviction + PV/PVC read + ConfigMap read.
+recovery:
+  # Master switch: "off" | "shadow" | "on".
+  #   off    - disabled (no behavior change, no extra RBAC).
+  #   shadow - detect and emit Events/logs for the action it WOULD take, but do
+  #            nothing. Use this first to validate against reality.
+  #   on     - act (repair-on-stage and the mid-flight reconciler).
+  mode: "off"
+  # Allow non-destructive repair at stage time (xfs_repair clean-log / e2fsck -p)
+  # after a read-only check confirms inconsistencies.
+  repair: false
+  # Allow the data-losing last resort (xfs_repair -L / e2fsck -fy). Requires
+  # `repair: true`. Leave false to keep real-corruption recovery a human decision.
+  repairDestructive: false
+  # Take a ZFS snapshot of the backing zvol before any mutating repair, via the
+  # TrueNAS WebSocket client the driver already uses (no new boundary).
+  snapshot: true
+  # How the reconciler removes a pod: "evict" (PodDisruptionBudget-respecting) or
+  # "delete" (raw).
+  evictMode: "evict"
+  # Consecutive confirmations required before the reconciler evicts/repairs.
+  debounce: 3
+  # Minimum time between recovery actions for one device.
+  cooldown: "300s"
+  # Max evictions per node per retry window.
+  maxEvictions: 5
+  # Hard bound on a single repair invocation.
+  repairTimeout: "10m"
+  # Per-device circuit-breaker window and attempt cap.
+  retryWindow: "1h"
+  retries: 3

@@ -478,15 +478,36 @@ func (s *NodeService) formatAndMountISCSIDevice(ctx context.Context, volumeID, d
 		args = []string{"-o", mount.JoinMountOptions(mountOptions), devicePath, stagingTargetPath}
 	}
 
-	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to mount device: %v, output: %s", err, string(output))
+	// mountFn performs the mount; reused for the initial attempt and the remount
+	// that auto-recovery retries after a repair.
+	mountFn := func(c context.Context) (string, error) {
+		mountCtx, cancel := context.WithTimeout(c, 30*time.Second)
+		defer cancel()
+		out, mErr := exec.CommandContext(mountCtx, "mount", args...).CombinedOutput()
+		return string(out), mErr
 	}
 
+	output, err := mountFn(ctx)
+	if err != nil {
+		// Attempt filesystem auto-recovery (no-op unless enabled).
+		if resp := s.recoverAndRetryMount(ctx, recoverParams{
+			volumeID:    volumeID,
+			devicePath:  devicePath,
+			stagingPath: stagingTargetPath,
+			fsType:      fsType,
+			datasetName: datasetName,
+			protocol:    ProtocolISCSI,
+			autoRepair:  volumeContext[VolumeContextKeyAutoRepair],
+			mountOutput: output,
+			remount:     mountFn,
+		}); resp != nil {
+			s.trackStagedVolume(volumeID, stagingTargetPath, devicePath, fsType, ProtocolISCSI, volumeContext)
+			return resp, nil
+		}
+		return nil, status.Errorf(codes.Internal, "Failed to mount device: %v, output: %s", err, output)
+	}
+
+	s.trackStagedVolume(volumeID, stagingTargetPath, devicePath, fsType, ProtocolISCSI, volumeContext)
 	klog.V(4).Infof("Mounted iSCSI device to staging path")
 	return &csi.NodeStageVolumeResponse{}, nil
 }

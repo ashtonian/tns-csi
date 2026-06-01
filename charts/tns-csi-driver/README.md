@@ -292,6 +292,30 @@ Detached snapshots use `zfs send/receive` to create independent dataset copies t
 | `node.resources.requests.cpu` | CPU request | `10m` |
 | `node.resources.requests.memory` | Memory request | `20Mi` |
 
+### Filesystem Auto-Recovery (block volumes)
+
+Recovers transport-induced filesystem shutdowns (XFS `SHUTDOWN_CORRUPT_INCORE`, ext4 aborted-journal) on NVMe-oF/iSCSI volumes, entirely on the node — no SSH or extra path into TrueNAS. Disabled by default; the driver behaves identically with `recovery.mode: "off"`. See [docs/RFC-AUTO-RECOVERY.md](../../docs/RFC-AUTO-RECOVERY.md).
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `recovery.mode` | `off` \| `shadow` (detect + log/Event, no action) \| `on` (act) | `"off"` |
+| `recovery.repair` | Allow non-destructive repair at stage time (`xfs_repair` clean-log / `e2fsck -p`) after a read-only check confirms inconsistencies | `false` |
+| `recovery.repairDestructive` | Allow the data-losing last resort (`xfs_repair -L` / `e2fsck -fy`); requires `recovery.repair` | `false` |
+| `recovery.snapshot` | Take a ZFS snapshot of the zvol before any mutating repair | `true` |
+| `recovery.evictMode` | Pod removal: `evict` (PodDisruptionBudget-respecting) or `delete` | `"evict"` |
+| `recovery.debounce` | Consecutive confirmations before the reconciler evicts/repairs | `3` |
+| `recovery.cooldown` | Minimum time between recovery actions for one device | `"300s"` |
+| `recovery.maxEvictions` | Max evictions per node per retry window | `5` |
+| `recovery.repairTimeout` | Hard bound on a single repair invocation | `"10m"` |
+| `recovery.retryWindow` | Per-device circuit-breaker window | `"1h"` |
+| `recovery.retries` | Per-device recovery attempts allowed within the window | `3` |
+
+**RBAC note:** setting `recovery.mode` to `shadow` or `on` grants the node ServiceAccount additional permissions (`pods` get/list, `pods/eviction` create, `persistentvolumes`/`persistentvolumeclaims` get/list, `configmaps` get/list/watch). With `off` (default), the node role is unchanged.
+
+**Cluster kill switch:** create a ConfigMap `tns-csi-recovery` in the driver namespace with `data.enabled: "false"` to pause the reconciler at runtime without a redeploy.
+
+**Recommended rollout:** start with `mode: shadow` and eyeball the Events/logs ("would repair…", "would evict…") for 2–3 weeks, then set `mode: on` with `repair: true`. Keep `repairDestructive: false` unless you have decided log-zeroing is acceptable.
+
 ### Dashboard Settings
 
 The controller can serve an in-cluster web dashboard showing volume health, Kubernetes binding, and metrics.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/fenio/tns-csi/pkg/driver"
 	"github.com/fenio/tns-csi/pkg/metrics"
@@ -34,6 +35,20 @@ var (
 	dashboardAddr             = flag.String("dashboard-addr", "", "Address for in-cluster web dashboard (e.g., ':2137', empty = disabled)")
 	dashboardPool             = flag.String("dashboard-pool", "", "ZFS pool for unmanaged volume discovery in dashboard")
 	clusterID                 = flag.String("cluster-id", "", "Unique identifier for this cluster (for multi-cluster TrueNAS sharing)")
+
+	// Filesystem auto-recovery for block volumes (NVMe-oF, iSCSI). All default
+	// off/safe; see docs/RFC-AUTO-RECOVERY.md.
+	autoRecovery            = flag.String("auto-recovery", "off", "Filesystem auto-recovery mode: off|shadow|on (shadow detects and logs without acting)")
+	autoRecoveryRepair      = flag.Bool("auto-recovery-repair", false, "Allow non-destructive repair at stage time (xfs_repair clean-log / e2fsck -p)")
+	autoRecoveryDestructive = flag.Bool("auto-recovery-repair-destructive", false, "Allow data-losing repair (xfs_repair -L / e2fsck -fy); requires -auto-recovery-repair")
+	autoRecoverySnapshot    = flag.Bool("auto-recovery-snapshot", true, "Take a ZFS snapshot before any mutating repair")
+	autoRecoveryEvict       = flag.String("auto-recovery-evict", "evict", "How the reconciler removes a pod: evict (PDB-respecting) | delete")
+	autoRecoveryDebounce    = flag.Int("auto-recovery-debounce", 3, "Consecutive confirmations required before the reconciler evicts/repairs")
+	autoRecoveryCooldown    = flag.Duration("auto-recovery-cooldown", 300*time.Second, "Minimum time between recovery actions for one device")
+	autoRecoveryMaxEvict    = flag.Int("auto-recovery-max-evictions", 5, "Max evictions per node per retry window")
+	autoRecoveryRepairTO    = flag.Duration("auto-recovery-repair-timeout", 10*time.Minute, "Hard bound on a single repair invocation")
+	autoRecoveryRetryWindow = flag.Duration("auto-recovery-retry-window", time.Hour, "Per-device circuit-breaker window")
+	autoRecoveryRetries     = flag.Int("auto-recovery-retries", 3, "Per-device recovery attempts allowed within the retry window")
 )
 
 func main() {
@@ -68,6 +83,31 @@ func main() {
 		klog.Fatal("Storage API key must be provided")
 	}
 
+	recoveryMode, err := driver.ParseRecoveryMode(*autoRecovery)
+	if err != nil {
+		klog.Fatalf("Invalid -auto-recovery flag: %v", err)
+	}
+	if *autoRecoveryEvict != driver.EvictModeEviction && *autoRecoveryEvict != driver.EvictModeDelete {
+		klog.Fatalf("Invalid -auto-recovery-evict flag %q (want evict|delete)", *autoRecoveryEvict)
+	}
+	recoveryCfg := driver.RecoveryConfig{
+		Mode:              recoveryMode,
+		Repair:            *autoRecoveryRepair,
+		RepairDestructive: *autoRecoveryDestructive,
+		Snapshot:          *autoRecoverySnapshot,
+		EvictMode:         *autoRecoveryEvict,
+		Debounce:          *autoRecoveryDebounce,
+		Cooldown:          *autoRecoveryCooldown,
+		MaxEvictions:      *autoRecoveryMaxEvict,
+		RepairTimeout:     *autoRecoveryRepairTO,
+		RetryWindow:       *autoRecoveryRetryWindow,
+		MaxRetries:        *autoRecoveryRetries,
+	}
+	if recoveryCfg.Enabled() {
+		klog.Infof("Filesystem auto-recovery enabled: mode=%s repair=%v destructive=%v snapshot=%v evict=%s",
+			recoveryCfg.Mode, recoveryCfg.Repair, recoveryCfg.RepairDestructive, recoveryCfg.Snapshot, recoveryCfg.EvictMode)
+	}
+
 	// Set version info for metrics endpoint
 	metrics.SetVersionInfo(version, gitCommit, buildDate)
 
@@ -89,6 +129,7 @@ func main() {
 		DashboardAddr:             *dashboardAddr,
 		DashboardPool:             *dashboardPool,
 		ClusterID:                 *clusterID,
+		Recovery:                  recoveryCfg,
 	})
 	if err != nil {
 		klog.Fatalf("Failed to create driver: %v", err)

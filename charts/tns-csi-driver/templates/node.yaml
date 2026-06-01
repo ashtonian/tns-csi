@@ -59,6 +59,36 @@ spec:
             - "--enable-nvme-discovery"
             {{- end }}
             - "--max-concurrent-nvme-connects={{ .Values.node.maxConcurrentNVMeConnects | default 5 }}"
+            {{- if ne (.Values.recovery.mode | default "off") "off" }}
+            # Filesystem auto-recovery for block volumes (see docs/RFC-AUTO-RECOVERY.md)
+            - "--auto-recovery={{ .Values.recovery.mode }}"
+            {{- if .Values.recovery.repair }}
+            - "--auto-recovery-repair"
+            {{- end }}
+            {{- if .Values.recovery.repairDestructive }}
+            - "--auto-recovery-repair-destructive"
+            {{- end }}
+            - "--auto-recovery-snapshot={{ .Values.recovery.snapshot | default true }}"
+            - "--auto-recovery-evict={{ .Values.recovery.evictMode | default "evict" }}"
+            {{- with .Values.recovery.debounce }}
+            - "--auto-recovery-debounce={{ . }}"
+            {{- end }}
+            {{- with .Values.recovery.cooldown }}
+            - "--auto-recovery-cooldown={{ . }}"
+            {{- end }}
+            {{- with .Values.recovery.maxEvictions }}
+            - "--auto-recovery-max-evictions={{ . }}"
+            {{- end }}
+            {{- with .Values.recovery.repairTimeout }}
+            - "--auto-recovery-repair-timeout={{ . }}"
+            {{- end }}
+            {{- with .Values.recovery.retryWindow }}
+            - "--auto-recovery-retry-window={{ . }}"
+            {{- end }}
+            {{- with .Values.recovery.retries }}
+            - "--auto-recovery-retries={{ . }}"
+            {{- end }}
+            {{- end }}
           env:
             - name: NODE_ID
               valueFrom:

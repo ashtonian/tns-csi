@@ -39,7 +39,11 @@ type NodeService struct {
 	apiClient       tnsapi.ClientInterface
 	nodeRegistry    *NodeRegistry
 	nvmeConnectSem  chan struct{}
+	tracker         *mountTracker
+	kube            *nodeKubeClient
+	breaker         *circuitBreaker
 	nodeID          string
+	recovery        RecoveryConfig
 	testMode        bool
 	enableDiscovery bool
 }
@@ -150,6 +154,10 @@ func (s *NodeService) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 
 	volumeID := req.GetVolumeId()
 	stagingTargetPath := req.GetStagingTargetPath()
+
+	// Drop the recovery tracker record for this staging path (no-op when recovery
+	// is disabled). The volume is being torn down, so it is no longer ours to heal.
+	s.tracker.Remove(stagingTargetPath)
 
 	// With independent subsystems, we determine the protocol by checking the staging path
 	// NVMe-oF volumes use block devices, NFS volumes use NFS mounts

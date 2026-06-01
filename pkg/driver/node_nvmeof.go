@@ -580,15 +580,38 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 		args = []string{"-o", mount.JoinMountOptions(mountOptions), devicePath, stagingTargetPath}
 	}
 
-	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to mount device: %v, output: %s", err, string(output))
+	// mountFn performs the mount; it is reused for the initial attempt and for
+	// the remount that auto-recovery retries after a repair.
+	mountFn := func(c context.Context) (string, error) {
+		mountCtx, cancel := context.WithTimeout(c, 30*time.Second)
+		defer cancel()
+		out, mErr := exec.CommandContext(mountCtx, "mount", args...).CombinedOutput()
+		return string(out), mErr
 	}
 
+	output, err := mountFn(ctx)
+	if err != nil {
+		// Attempt filesystem auto-recovery. This is a no-op (returns nil) unless
+		// recovery is enabled; on success the device is now mounted, otherwise
+		// the original mount error is surfaced unchanged.
+		if resp := s.recoverAndRetryMount(ctx, recoverParams{
+			volumeID:    volumeID,
+			devicePath:  devicePath,
+			stagingPath: stagingTargetPath,
+			fsType:      fsType,
+			datasetName: datasetName,
+			protocol:    ProtocolNVMeOF,
+			autoRepair:  volumeContext[VolumeContextKeyAutoRepair],
+			mountOutput: output,
+			remount:     mountFn,
+		}); resp != nil {
+			s.trackStagedVolume(volumeID, stagingTargetPath, devicePath, fsType, ProtocolNVMeOF, volumeContext)
+			return resp, nil
+		}
+		return nil, status.Errorf(codes.Internal, "Failed to mount device: %v, output: %s", err, output)
+	}
+
+	s.trackStagedVolume(volumeID, stagingTargetPath, devicePath, fsType, ProtocolNVMeOF, volumeContext)
 	klog.V(4).Infof("Mounted NVMe device to staging path")
 	return &csi.NodeStageVolumeResponse{}, nil
 }
