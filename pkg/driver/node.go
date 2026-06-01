@@ -39,13 +39,23 @@ type NodeService struct {
 	apiClient       tnsapi.ClientInterface
 	nodeRegistry    *NodeRegistry
 	nvmeConnectSem  chan struct{}
-	tracker         *mountTracker
-	kube            *nodeKubeClient
-	breaker         *circuitBreaker
 	nodeID          string
-	recovery        RecoveryConfig
 	testMode        bool
 	enableDiscovery bool
+
+	// recovery controls filesystem auto-recovery for block volumes. The zero
+	// value (Mode "") is dormant: NewNodeService leaves it unset and the driver
+	// populates it from config.
+	recovery RecoveryConfig
+	// tracker is the authoritative record of volumes this node has staged — the
+	// correlation source the reconciler uses instead of inferring from /proc.
+	// nil when recovery is disabled.
+	tracker *mountTracker
+	// kube is the node plugin's window into the Kubernetes API for recovery
+	// (PVC resolution, Events, pod eviction). nil when recovery is disabled.
+	kube *nodeKubeClient
+	// limiter bounds per-device failed recovery attempts. nil when recovery is disabled.
+	limiter *failureLimiter
 }
 
 // NewNodeService creates a new node service.

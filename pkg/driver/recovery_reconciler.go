@@ -29,10 +29,9 @@ var errNoMountTable = errors.New("recovery: no readable mount table")
 
 // recoveryReconciler runs node-side recovery loops out-of-band. CSI is
 // request-driven: the kubelet only calls the node plugin on stage/publish/
-// unstage, never "your mounted filesystem just died". These loops fill that gap
-// — reacting to kernel filesystem-shutdown events and to stale mounts — and so
-// replace the external recovery DaemonSet. Everything is gated by the recovery
-// mode (off/shadow/on) and the cluster kill switch.
+// unstage, never "your mounted filesystem just died". These loops fill that gap,
+// reacting to kernel filesystem-shutdown events and to stale mounts. Everything
+// is gated by the recovery mode (off/shadow/on) and the cluster kill switch.
 type recoveryReconciler struct {
 	node         *NodeService
 	lastAction   map[string]time.Time
@@ -56,14 +55,28 @@ func newRecoveryReconciler(s *NodeService) *recoveryReconciler {
 func (r *recoveryReconciler) run(ctx context.Context) {
 	klog.Infof("recovery reconciler starting (mode=%s evict=%s debounce=%d cooldown=%s)",
 		r.cfg.Mode, r.cfg.EvictMode, r.cfg.Debounce, r.cfg.Cooldown)
+
 	var wg sync.WaitGroup
 	wg.Add(3)
-	go func() { defer wg.Done(); r.watchKmsg(ctx) }()
+
+	// Event-driven: tail /dev/kmsg for filesystem-shutdown signatures.
+	go func() {
+		defer wg.Done()
+		r.watchKmsg(ctx)
+	}()
+
+	// Periodic: lazy-unmount staging mounts whose backing device has vanished.
 	go func() {
 		defer wg.Done()
 		r.loop(ctx, "stale-globalmount-sweep", staleSweepInterval, r.sweepStaleGlobalmounts)
 	}()
-	go func() { defer wg.Done(); r.loop(ctx, "stale-bind-heal", bindHealInterval, r.healStaleBinds) }()
+
+	// Periodic: evict pods left with a dead bind mount after a reconnect.
+	go func() {
+		defer wg.Done()
+		r.loop(ctx, "stale-bind-heal", bindHealInterval, r.healStaleBinds)
+	}()
+
 	wg.Wait()
 	klog.Infof("recovery reconciler stopped")
 }
@@ -91,7 +104,7 @@ func (r *recoveryReconciler) paused(ctx context.Context) bool {
 	return r.node.kube.RecoveryPaused(ctx)
 }
 
-// ---- shutdown watcher (replaces the daemonset's xfs-recovery container) ----
+// ---- shutdown watcher ----
 
 // watchKmsg tails /dev/kmsg for filesystem-shutdown signatures and reacts to
 // those affecting volumes this node staged.
@@ -196,7 +209,7 @@ func (r *recoveryReconciler) handleShutdown(ctx context.Context, sig fsrepair.Sh
 	}
 }
 
-// ---- stale globalmount sweeper (replaces stale-mount-cleanup) ----
+// ---- stale globalmount sweeper ----
 
 // sweepStaleGlobalmounts lazy-unmounts staging mounts whose backing device has
 // disappeared (an ungraceful target loss that never triggers NodeUnstageVolume).
@@ -205,7 +218,8 @@ func (r *recoveryReconciler) sweepStaleGlobalmounts(ctx context.Context) {
 		if vol.DevicePath == "" || vol.StagingPath == "" {
 			continue
 		}
-		if _, err := os.Stat(vol.DevicePath); err == nil {
+		_, statErr := os.Stat(vol.DevicePath)
+		if statErr == nil {
 			continue // device still present
 		}
 		mounted, err := mount.IsMounted(ctx, vol.StagingPath)
@@ -217,13 +231,14 @@ func (r *recoveryReconciler) sweepStaleGlobalmounts(ctx context.Context) {
 			continue
 		}
 		klog.Warningf("recovery: lazy-unmounting stale globalmount %s (device %s gone)", vol.StagingPath, vol.DevicePath)
-		if err := lazyUnmount(ctx, vol.StagingPath); err != nil {
-			klog.Warningf("recovery: failed to lazy-unmount %s: %v", vol.StagingPath, err)
+		unmountErr := lazyUnmount(ctx, vol.StagingPath)
+		if unmountErr != nil {
+			klog.Warningf("recovery: failed to lazy-unmount %s: %v", vol.StagingPath, unmountErr)
 		}
 	}
 }
 
-// ---- stale bind healer (replaces stale-bind-heal) ----
+// ---- stale bind healer ----
 
 // healStaleBinds evicts pods whose CSI bind mount returns I/O errors while the
 // backing globalmount is healthy — the "pod looks Ready but its filesystem is
@@ -291,7 +306,8 @@ func (r *recoveryReconciler) healStaleBinds(ctx context.Context) {
 
 func (r *recoveryReconciler) evict(ctx context.Context, p podRef, ref pvcRef, reason string) {
 	klog.Infof("recovery: evicting pod %s/%s via %s (%s)", p.Namespace, p.Name, r.cfg.EvictMode, reason)
-	if err := r.node.kube.EvictPod(ctx, p.Namespace, p.Name, r.cfg.EvictMode); err != nil {
+	err := r.node.kube.EvictPod(ctx, p.Namespace, p.Name, r.cfg.EvictMode)
+	if err != nil {
 		klog.Warningf("recovery: failed to evict %s/%s: %v", p.Namespace, p.Name, err)
 		r.node.emitRecoveryEvent(ctx, ref, "Warning", fmt.Sprintf("Failed to evict pod %s/%s after %s: %v", p.Namespace, p.Name, reason, err))
 		return
@@ -302,7 +318,8 @@ func (r *recoveryReconciler) evict(ctx context.Context, p podRef, ref pvcRef, re
 func (r *recoveryReconciler) coolDownOK(dev string, now time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if last, ok := r.lastAction[dev]; ok && now.Sub(last) < r.cfg.Cooldown {
+	last, ok := r.lastAction[dev]
+	if ok && now.Sub(last) < r.cfg.Cooldown {
 		return false
 	}
 	return true
@@ -409,7 +426,8 @@ var podUIDRe = regexp.MustCompile(`/pods/([^/]+)/`)
 // podUIDFromMountPath extracts the pod UID from a kubelet pod mount path like
 // /var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~csi/<pv>/mount.
 func podUIDFromMountPath(mountpoint string) string {
-	if m := podUIDRe.FindStringSubmatch(mountpoint); m != nil {
+	m := podUIDRe.FindStringSubmatch(mountpoint)
+	if m != nil {
 		return m[1]
 	}
 	return ""

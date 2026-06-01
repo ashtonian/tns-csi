@@ -131,7 +131,8 @@ func (k *nodeKubeClient) EmitEvent(ctx context.Context, ref pvcRef, eventType, r
 		LastTimestamp:  now,
 		Count:          1,
 	}
-	if _, createErr := cs.CoreV1().Events(ref.Namespace).Create(ctx, ev, metav1.CreateOptions{}); createErr != nil {
+	_, createErr := cs.CoreV1().Events(ref.Namespace).Create(ctx, ev, metav1.CreateOptions{})
+	if createErr != nil {
 		klog.V(4).Infof("recovery: failed to emit Event on %s/%s: %v", ref.Namespace, ref.Name, createErr)
 	}
 }

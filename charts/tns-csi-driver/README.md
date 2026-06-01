@@ -294,7 +294,7 @@ Detached snapshots use `zfs send/receive` to create independent dataset copies t
 
 ### Filesystem Auto-Recovery (block volumes)
 
-Recovers transport-induced filesystem shutdowns (XFS `SHUTDOWN_CORRUPT_INCORE`, ext4 aborted-journal) on NVMe-oF/iSCSI volumes, entirely on the node — no SSH or extra path into TrueNAS. Disabled by default; the driver behaves identically with `recovery.mode: "off"`. See [docs/RFC-AUTO-RECOVERY.md](../../docs/RFC-AUTO-RECOVERY.md).
+Recovers transport-induced filesystem shutdowns (XFS `SHUTDOWN_CORRUPT_INCORE`, ext4 aborted-journal) on NVMe-oF/iSCSI volumes, entirely on the node — no SSH or extra path into TrueNAS. Disabled by default; the driver behaves identically with `recovery.mode: "off"`.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|

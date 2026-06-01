@@ -123,8 +123,8 @@ func baseDeviceName(dev string) string {
 }
 
 // load reads persisted state. Missing or unreadable state is not an error: the
-// in-memory map is the source of truth and the reconciler also rebuilds from
-// /proc, so a lost file is recovered on the next stage.
+// in-memory map is the source of truth, and the next stage of any volume
+// re-persists it, so a lost file is self-healing.
 func (t *mountTracker) load() {
 	data, err := os.ReadFile(t.statePath)
 	if err != nil {
@@ -134,7 +134,8 @@ func (t *mountTracker) load() {
 		return
 	}
 	var vols []stagedVolume
-	if unmarshalErr := json.Unmarshal(data, &vols); unmarshalErr != nil {
+	unmarshalErr := json.Unmarshal(data, &vols)
+	if unmarshalErr != nil {
 		klog.Warningf("recovery: could not parse mount tracker state %s: %v", t.statePath, unmarshalErr)
 		return
 	}
@@ -166,7 +167,8 @@ func (t *mountTracker) save() {
 		return
 	}
 	dir := filepath.Dir(t.statePath)
-	if mkErr := os.MkdirAll(dir, 0o750); mkErr != nil {
+	mkErr := os.MkdirAll(dir, 0o750)
+	if mkErr != nil {
 		klog.Warningf("recovery: could not create mount tracker state dir: %v", mkErr)
 		return
 	}
@@ -176,18 +178,22 @@ func (t *mountTracker) save() {
 		return
 	}
 	tmpName := tmp.Name()
-	if _, writeErr := tmp.Write(data); writeErr != nil {
+
+	_, writeErr := tmp.Write(data)
+	if writeErr != nil {
 		_ = tmp.Close()        //nolint:errcheck // best-effort cleanup on the error path
 		_ = os.Remove(tmpName) //nolint:errcheck // best-effort cleanup on the error path
 		klog.Warningf("recovery: could not write mount tracker state: %v", writeErr)
 		return
 	}
-	if closeErr := tmp.Close(); closeErr != nil {
+	closeErr := tmp.Close()
+	if closeErr != nil {
 		_ = os.Remove(tmpName) //nolint:errcheck // best-effort cleanup on the error path
 		klog.Warningf("recovery: could not close mount tracker temp file: %v", closeErr)
 		return
 	}
-	if renErr := os.Rename(tmpName, t.statePath); renErr != nil {
+	renErr := os.Rename(tmpName, t.statePath)
+	if renErr != nil {
 		_ = os.Remove(tmpName) //nolint:errcheck // best-effort cleanup on the error path
 		klog.Warningf("recovery: could not persist mount tracker state: %v", renErr)
 	}

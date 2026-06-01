@@ -490,7 +490,7 @@ func (s *NodeService) formatAndMountISCSIDevice(ctx context.Context, volumeID, d
 	output, err := mountFn(ctx)
 	if err != nil {
 		// Attempt filesystem auto-recovery (no-op unless enabled).
-		if resp := s.recoverAndRetryMount(ctx, recoverParams{
+		resp := s.recoverAndRetryMount(ctx, recoverParams{
 			volumeID:    volumeID,
 			devicePath:  devicePath,
 			stagingPath: stagingTargetPath,
@@ -500,7 +500,8 @@ func (s *NodeService) formatAndMountISCSIDevice(ctx context.Context, volumeID, d
 			autoRepair:  volumeContext[VolumeContextKeyAutoRepair],
 			mountOutput: output,
 			remount:     mountFn,
-		}); resp != nil {
+		})
+		if resp != nil {
 			s.trackStagedVolume(volumeID, stagingTargetPath, devicePath, fsType, ProtocolISCSI, volumeContext)
 			return resp, nil
 		}

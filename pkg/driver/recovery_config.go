@@ -41,19 +41,37 @@ const (
 
 // RecoveryConfig controls filesystem auto-recovery for block volumes (NVMe-oF,
 // iSCSI). Every field defaults to off/safe: with zero overrides the driver does
-// not change behavior. See docs/RFC-AUTO-RECOVERY.md.
+// not change behavior.
 type RecoveryConfig struct {
-	Mode              RecoveryMode
-	EvictMode         string
-	Debounce          int
-	Cooldown          time.Duration
-	MaxEvictions      int
-	RepairTimeout     time.Duration
-	RetryWindow       time.Duration
-	MaxRetries        int
-	Repair            bool
+	// Mode is the master switch: off | shadow | on.
+	Mode RecoveryMode
+	// Repair allows non-destructive repair at stage time (xfs_repair clean-log,
+	// e2fsck -p) after a read-only check confirms inconsistencies.
+	Repair bool
+	// RepairDestructive is a separate gate for the data-losing last resort
+	// (xfs_repair -L, e2fsck -fy). Has no effect unless Repair is also set.
 	RepairDestructive bool
-	Snapshot          bool
+	// Snapshot takes a ZFS snapshot of the backing zvol before any mutating
+	// repair, via the TrueNAS WebSocket client the driver already holds.
+	Snapshot bool
+
+	// EvictMode selects how the reconciler removes a pod: "evict" | "delete".
+	EvictMode string
+	// Debounce is the number of consecutive confirmations the reconciler
+	// requires before evicting/repairing.
+	Debounce int
+	// Cooldown is the minimum time between recovery actions for one device.
+	Cooldown time.Duration
+	// MaxEvictions caps evictions per node per RetryWindow.
+	MaxEvictions int
+	// RepairTimeout bounds a single repair invocation.
+	RepairTimeout time.Duration
+
+	// RetryWindow and MaxRetries bound the per-device failure limiter: after
+	// MaxRetries failed recovery attempts within RetryWindow, recovery stops for
+	// that device until the window elapses or a recovery succeeds.
+	RetryWindow time.Duration
+	MaxRetries  int
 }
 
 // DefaultRecoveryConfig returns the safe defaults (recovery off).

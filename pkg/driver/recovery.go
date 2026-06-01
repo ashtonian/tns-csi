@@ -22,77 +22,81 @@ var (
 	errUnknownDataset = errors.New("recovery: unknown backing dataset for volume")
 )
 
-// circuitBreaker bounds how many recovery attempts may occur for a key (device)
-// within a rolling window, so a flapping device or a false-positive loop cannot
-// drive repeated repairs. It mirrors the external daemon's per-device breaker.
-type circuitBreaker struct {
-	entries  map[string]*breakerEntry
+// failureLimiter bounds how many *failed* recovery attempts may occur for a key
+// (device) within a rolling window. It is deliberately not a circuit breaker —
+// there is no half-open probe state — just a per-device retry budget so a
+// genuinely broken device escalates to a human instead of being retried forever.
+// A successful recovery clears the count.
+type failureLimiter struct {
+	entries  map[string]*failureWindow
 	window   time.Duration
 	maxFails int
 	mu       sync.Mutex
 }
 
-type breakerEntry struct {
+type failureWindow struct {
 	first time.Time
 	count int
 }
 
-func newCircuitBreaker(window time.Duration, maxFails int) *circuitBreaker {
-	return &circuitBreaker{
+func newFailureLimiter(window time.Duration, maxFails int) *failureLimiter {
+	return &failureLimiter{
+		entries:  make(map[string]*failureWindow),
 		window:   window,
 		maxFails: maxFails,
-		entries:  make(map[string]*breakerEntry),
 	}
 }
 
-// blocked reports whether the breaker is open for key — i.e. maxFails *failed*
-// recovery attempts have occurred within the rolling window. It does not modify
-// state, so checking the breaker never consumes a slot. now is passed for
+// blocked reports whether key has reached maxFails failures within the window. It
+// does not modify state, so checking never consumes budget. now is passed for
 // testability.
-func (b *circuitBreaker) blocked(key string, now time.Time) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	e := b.entries[key]
-	if e == nil || now.Sub(e.first) > b.window {
+func (l *failureLimiter) blocked(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	e := l.entries[key]
+	if e == nil || now.Sub(e.first) > l.window {
 		return false
 	}
-	return e.count >= b.maxFails
+	return e.count >= l.maxFails
 }
 
 // recordFailure counts one failed recovery attempt for key, starting a fresh
 // window if none is open or the previous one has elapsed.
-func (b *circuitBreaker) recordFailure(key string, now time.Time) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	e := b.entries[key]
-	if e == nil || now.Sub(e.first) > b.window {
-		b.entries[key] = &breakerEntry{count: 1, first: now}
+func (l *failureLimiter) recordFailure(key string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	e := l.entries[key]
+	if e == nil || now.Sub(e.first) > l.window {
+		l.entries[key] = &failureWindow{first: now, count: 1}
 		return
 	}
 	e.count++
 }
 
-// recordSuccess clears the failure count for key: a successful recovery means
-// the device is healthy again, so repeated successful recoveries (a flapping but
-// recoverable transport link) must never trip the breaker.
-func (b *circuitBreaker) recordSuccess(key string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.entries, key)
+// recordSuccess clears the failure count for key: a successful recovery means the
+// device is healthy again, so a flapping-but-recoverable link never exhausts its
+// budget.
+func (l *failureLimiter) recordSuccess(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	delete(l.entries, key)
 }
 
 // recoverParams carries everything recoverAndRetryMount needs to attempt
 // recovery of a block-device mount failure.
 type recoverParams struct {
-	remount     func(ctx context.Context) (string, error)
 	volumeID    string
 	devicePath  string
 	stagingPath string
 	fsType      string
-	datasetName string
-	protocol    string
-	autoRepair  string
-	mountOutput string
+	datasetName string                                    // backing zvol, for the pre-repair snapshot
+	protocol    string                                    // for tracking
+	autoRepair  string                                    // per-volume opt-out from volume context ("", "true", "false")
+	mountOutput string                                    // combined output of the failed mount
+	remount     func(ctx context.Context) (string, error) // re-attempt the mount; returns output and error
 }
 
 // recoverAndRetryMount attempts to recover a block volume whose filesystem the
@@ -104,7 +108,7 @@ type recoverParams struct {
 // The path is defensive by construction: it engages only on a shutdown-like
 // failure, mutates a filesystem only after an independent read-only check
 // confirms inconsistencies, only when the relevant opt-in flags are set, and
-// only within the per-device circuit breaker. In shadow mode it decides and
+// only within the per-device failure budget. In shadow mode it decides and
 // reports but never acts.
 func (s *NodeService) recoverAndRetryMount(ctx context.Context, p recoverParams) (resp *csi.NodeStageVolumeResponse) {
 	if !s.recovery.Enabled() || !volumeRecoveryEnabled(p.autoRepair) {
@@ -129,16 +133,16 @@ func (s *NodeService) recoverAndRetryMount(ctx context.Context, p recoverParams)
 		return nil
 	}
 
-	// The circuit breaker and the actions below apply only in acting mode. Shadow
+	// The failure limiter and the actions below apply only in acting mode. Shadow
 	// mode must observe (run the read-only check, report what it would do) without
-	// ever changing the stage outcome or consuming breaker state.
+	// ever changing the stage outcome or consuming limiter budget.
 	acting := s.recovery.Acting()
-	if acting && s.breaker != nil {
-		// Gate 2: per-device circuit breaker. Checked WITHOUT consuming a slot —
+	if acting && s.limiter != nil {
+		// Gate 2: per-device failure limiter. Checked WITHOUT consuming budget —
 		// only *failed* recoveries count, recorded in the deferred accounting
 		// below. A successful recovery resets the count, so a flapping-but-
-		// recoverable link never trips the breaker.
-		if s.breaker.blocked(dev, time.Now()) {
+		// recoverable link never exhausts its budget.
+		if s.limiter.blocked(dev, time.Now()) {
 			msg := fmt.Sprintf("device %s exceeded %d failed recovery attempts within %s — manual intervention required",
 				dev, s.recovery.MaxRetries, s.recovery.RetryWindow)
 			klog.Errorf("%s %s", logPrefix, msg)
@@ -147,9 +151,9 @@ func (s *NodeService) recoverAndRetryMount(ctx context.Context, p recoverParams)
 		}
 		defer func() {
 			if resp != nil {
-				s.breaker.recordSuccess(dev)
+				s.limiter.recordSuccess(dev)
 			} else {
-				s.breaker.recordFailure(dev, time.Now())
+				s.limiter.recordFailure(dev, time.Now())
 			}
 		}()
 	}
@@ -207,7 +211,8 @@ func (s *NodeService) recoverAndRetryMount(ctx context.Context, p recoverParams)
 	// snapshot and we cannot take one, do NOT mutate — the snapshot is the
 	// rollback they asked for.
 	if s.recovery.Snapshot {
-		if snapErr := s.snapshotBeforeRepair(ctx, p); snapErr != nil {
+		snapErr := s.snapshotBeforeRepair(ctx, p)
+		if snapErr != nil {
 			msg := fmt.Sprintf("%s pre-repair snapshot failed: %v; aborting repair to preserve rollback safety", dev, snapErr)
 			klog.Errorf("%s %s", logPrefix, msg)
 			s.emitRecoveryEvent(ctx, ref, "Warning", msg)
@@ -277,7 +282,8 @@ func (s *NodeService) snapshotBeforeRepair(ctx context.Context, p recoverParams)
 	name := fmt.Sprintf("tns-csi-autorepair-%d", time.Now().Unix())
 	snapCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if _, err := s.apiClient.CreateSnapshot(snapCtx, tnsapi.SnapshotCreateParams{Dataset: p.datasetName, Name: name}); err != nil {
+	_, err := s.apiClient.CreateSnapshot(snapCtx, tnsapi.SnapshotCreateParams{Dataset: p.datasetName, Name: name})
+	if err != nil {
 		return err
 	}
 	klog.Infof("recovery: snapshot %s@%s taken before repair of volume %s", p.datasetName, name, p.volumeID)

@@ -60,7 +60,7 @@ spec:
             {{- end }}
             - "--max-concurrent-nvme-connects={{ .Values.node.maxConcurrentNVMeConnects | default 5 }}"
             {{- if ne (.Values.recovery.mode | default "off") "off" }}
-            # Filesystem auto-recovery for block volumes (see docs/RFC-AUTO-RECOVERY.md)
+            # Filesystem auto-recovery for block volumes
             - "--auto-recovery={{ .Values.recovery.mode }}"
             {{- if .Values.recovery.repair }}
             - "--auto-recovery-repair"

@@ -36,8 +36,7 @@ var (
 	dashboardPool             = flag.String("dashboard-pool", "", "ZFS pool for unmanaged volume discovery in dashboard")
 	clusterID                 = flag.String("cluster-id", "", "Unique identifier for this cluster (for multi-cluster TrueNAS sharing)")
 
-	// Filesystem auto-recovery for block volumes (NVMe-oF, iSCSI). All default
-	// off/safe; see docs/RFC-AUTO-RECOVERY.md.
+	// Filesystem auto-recovery for block volumes (NVMe-oF, iSCSI). All default off/safe.
 	autoRecovery            = flag.String("auto-recovery", "off", "Filesystem auto-recovery mode: off|shadow|on (shadow detects and logs without acting)")
 	autoRecoveryRepair      = flag.Bool("auto-recovery-repair", false, "Allow non-destructive repair at stage time (xfs_repair clean-log / e2fsck -p)")
 	autoRecoveryDestructive = flag.Bool("auto-recovery-repair-destructive", false, "Allow data-losing repair (xfs_repair -L / e2fsck -fy); requires -auto-recovery-repair")
@@ -47,7 +46,7 @@ var (
 	autoRecoveryCooldown    = flag.Duration("auto-recovery-cooldown", 300*time.Second, "Minimum time between recovery actions for one device")
 	autoRecoveryMaxEvict    = flag.Int("auto-recovery-max-evictions", 5, "Max evictions per node per retry window")
 	autoRecoveryRepairTO    = flag.Duration("auto-recovery-repair-timeout", 10*time.Minute, "Hard bound on a single repair invocation")
-	autoRecoveryRetryWindow = flag.Duration("auto-recovery-retry-window", time.Hour, "Per-device circuit-breaker window")
+	autoRecoveryRetryWindow = flag.Duration("auto-recovery-retry-window", time.Hour, "Per-device failure-limiter window")
 	autoRecoveryRetries     = flag.Int("auto-recovery-retries", 3, "Per-device recovery attempts allowed within the retry window")
 )
 

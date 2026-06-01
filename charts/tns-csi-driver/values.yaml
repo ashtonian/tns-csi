@@ -646,8 +646,8 @@ grafana:
 # Recovers transport-induced filesystem shutdowns (XFS SHUTDOWN_CORRUPT_INCORE,
 # ext4 aborted-journal) on the node, without any new path into TrueNAS.
 # All defaults are off/safe — the driver behaves identically with recovery off.
-# See docs/RFC-AUTO-RECOVERY.md. Enabling mode!=off also grants the node
-# ServiceAccount pod-eviction + PV/PVC read + ConfigMap read.
+# Enabling mode!=off also grants the node ServiceAccount pod-eviction +
+# PV/PVC read + ConfigMap read.
 recovery:
   # Master switch: "off" | "shadow" | "on".
   #   off    - disabled (no behavior change, no extra RBAC).

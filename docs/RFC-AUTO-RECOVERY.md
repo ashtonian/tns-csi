@@ -2,9 +2,6 @@
 
 **Status:** Draft / proposed
 **Component:** `pkg/driver` (node plugin), `pkg/fsrepair`
-**Supersedes:** an external `tns-nvmeof-recovery` DaemonSet that recovers by scraping `dmesg` +
-`/proc/1/mountinfo` and deleting pods, and a prior proposal to extend that daemon with an SSH /
-`system.shell` path into TrueNAS to run `xfs_repair` on the zvol.
 
 ---
 
@@ -28,24 +25,26 @@ The cost is operator toil: each event leaves the consuming pods stuck in `Contai
 `Init:0/N` until a human notices, and — for the XFS `CORRUPT (0x8)` case specifically — manually
 intervenes. There is currently **no filesystem-repair logic anywhere in the driver**.
 
-### Why the prior approaches are the wrong shape
+### Why in-driver, and not an out-of-band agent
 
-The current mitigation lives **outside** the driver: a DaemonSet whose containers watch `dmesg`,
-infer the device→PV→PVC→pod chain from `/proc/1/mountinfo` + the Kubernetes API, `apk add` their
-tooling at runtime, and delete pods to force a reschedule. Its `CORRUPT` branch deliberately gives
-up and logs "run `xfs_repair` on the underlying zvol" — leaving the manual toil in place.
+Two out-of-band designs were considered and rejected:
 
-A proposed extension would have the external daemon reach **into** TrueNAS over SSH (a dedicated
-`ansible_xfs_repair` key) or `system.shell` to run `xfs_repair` against `/dev/zvol/...`. This is
-the wrong shape for two reasons:
+1. **A separate privileged DaemonSet** that watches `dmesg`, infers the device→PV→PVC→pod chain from
+   `/proc/1/mountinfo` plus the Kubernetes API, and deletes pods to force a reschedule. It is blind
+   to the driver's own state (it re-derives everything the node plugin already knows), and it can
+   only reschedule around a shut-down filesystem, not repair one.
+2. **Reaching into TrueNAS over SSH** (or `system.shell`) to run `xfs_repair` against the zvol. This
+   is the wrong shape for two reasons:
+   - **It crosses a boundary the driver already owns and the project explicitly avoids.** tns-csi's
+     stated design is *WebSocket API only, no SSH* (see `docs/COMPARISON-DEMOCRATIC-CSI.md`). Adding
+     an SSH key + shell-exec on the NAS introduces a new credential, a new trust boundary, and
+     destructive shell access on the storage host.
+   - **It is unnecessary.** `xfs_repair`/`e2fsck` operate on block-device bytes. The initiator
+     device `/dev/nvme0n1` on the node holds the *same on-disk metadata* as the backing zvol, so
+     there is no reason to go to the NAS to repair it.
 
-1. **It crosses a boundary the driver already owns and the project explicitly avoids.** tns-csi's
-   stated design is *WebSocket API only, no SSH* (see `docs/COMPARISON-DEMOCRATIC-CSI.md`). Adding
-   an SSH key + shell-exec on the NAS introduces a new credential, a new trust boundary, and
-   destructive shell access on the storage host — exactly what the driver was built to avoid.
-2. **It is unnecessary.** `xfs_repair`/`e2fsck` operate on block-device bytes. The initiator device
-   `/dev/nvme0n1` on the node holds the *same on-disk metadata* as the backing zvol. There is no
-   reason to go to the NAS to repair it.
+Doing the recovery in the node plugin avoids both: it already owns the device, the device→volume
+mapping, the TrueNAS WebSocket client, and the unmounted window CSI `NodeStageVolume` provides.
 
 ## 2. Goals / non-goals
 
@@ -60,7 +59,7 @@ the wrong shape for two reasons:
   unmounted, human notified) while destroying nothing.
 - Be **hard to fool**: a false "corruption" signal must never cause a destructive write or a wrong
   pod eviction.
-- Fully **replace the external DaemonSet**.
+- Be **self-contained in the driver** — no separate recovery DaemonSet or sidecar.
 
 **Non-goals**
 
@@ -82,8 +81,8 @@ The CSI node plugin already sits on the right side of every boundary this needs:
 | Snapshot the zvol | the existing `apiClient.CreateSnapshot` over the WebSocket the driver already uses |
 | Evict the consuming pod | a node-side in-cluster client (the `pkg/dashboard` in-cluster pattern already exists) |
 
-The external daemon's `namespace.delete` dance existed only to *manufacture* the exclusivity the
-CSI access-mode invariant already gives us for free.
+An out-of-band approach would have to *manufacture* this exclusivity (e.g. by detaching the
+namespace on the target); the CSI access-mode invariant gives it to us for free.
 
 ## 4. Design
 
@@ -110,24 +109,23 @@ Hook the `mount` failure in the shared block path (`formatAndMountNVMeDevice` in
 6. **Retry mount**, emit a Kubernetes Event on the PVC with the signature, the `-n` output, the
    action taken, and the duration.
 
-A **per-device circuit breaker** (max attempts per window, mirroring the daemonset's 3/1h) bounds
-repeated attempts; once open, recovery stops and surfaces to a human.
+A **per-device failure limiter** (max *failed* attempts per window) bounds repeated attempts; once
+the budget is exhausted, recovery stops and surfaces to a human. A successful recovery resets it.
 
 ### 4.2 Mid-flight reconciler (out-of-band node agent)
 
 A goroutine started from `driver.Run()` (node mode, gated), cancelled in `Stop()` — the same
-pattern the metrics and dashboard servers already use. It replaces the three DaemonSet containers:
+pattern the metrics and dashboard servers already use. It runs three loops:
 
-- **Shutdown watcher** (replaces `xfs-recovery`): reads `/dev/kmsg` for XFS *and* ext4 shutdown
-  signatures, correlates the device to a staged volume via the authoritative tracker (§4.3), and —
-  for a confirmed shutdown of an already-mounted volume — evicts the consuming pod so kubelet
-  reschedules → repair-on-stage runs. This closes the loop the daemonset's `CORRUPT` branch leaves
-  open.
-- **Stale globalmount sweeper** (replaces `stale-mount-cleanup`): when a staged device is gone,
-  lazy-unmount and remove the stale globalmount dir so kubelet can recreate it. (Ungraceful device
-  loss never triggers `NodeUnstageVolume`; this is a genuine kubelet blind spot.)
-- **Stale bind healer** (replaces `stale-bind-heal`): when a pod's bind mount returns EIO while its
-  globalmount is healthy, evict the pod so its controller recreates it with a fresh bind mount.
+- **Shutdown watcher**: reads `/dev/kmsg` for XFS *and* ext4 shutdown signatures, correlates the
+  device to a staged volume via the authoritative tracker (§4.3), and — for a confirmed shutdown of
+  an already-mounted volume — evicts the consuming pod so kubelet reschedules → repair-on-stage
+  runs.
+- **Stale globalmount sweeper**: when a staged device is gone, lazy-unmount the stale globalmount so
+  kubelet can recreate it. (Ungraceful device loss never triggers `NodeUnstageVolume`; this is a
+  genuine kubelet blind spot.)
+- **Stale bind healer**: when a pod's bind mount returns EIO while its globalmount is healthy, evict
+  the pod so its controller recreates it with a fresh bind mount.
 
 ### 4.3 Authoritative mount tracker (the false-positive foundation)
 
@@ -136,8 +134,8 @@ protocol, autoRepair-policy}`, clears it at `NodeUnstageVolume`, and persists it
 host-backed `/var/lib/tns-csi` volume (a fixed hostPath in the node DaemonSet), reloading it on
 startup so it survives a plugin pod restart while host mounts persist. The PVC reference is resolved
 on demand via the node's Kubernetes client (PV `volumeHandle` → `claimRef`), not stored. The
-reconciler acts **only** on volumes in this map — replacing the daemonset's `/proc/1/mountinfo`
-regex guessing with authoritative knowledge of what we staged. (The sweep/heal loops additionally
+reconciler acts **only** on volumes in this map — authoritative knowledge of what the node staged,
+rather than re-deriving it by scraping `/proc`. (The sweep/heal loops additionally
 read `/proc/1/mounts` to locate the live mounts for tracked volumes.)
 
 ## 5. Configuration
@@ -157,7 +155,7 @@ surfaces into `volumeContext` (so the node needs no extra API call at stage time
 | `--auto-recovery-cooldown` | duration | `300s` | Per-device cooldown between actions. |
 | `--auto-recovery-max-evictions` | int | `5` | Max evictions per node per window. |
 | `--auto-recovery-repair-timeout` | duration | `10m` | Hard bound on a single repair invocation. |
-| `--auto-recovery-retry-window` / `-retries` | duration / int | `1h` / `3` | Per-device circuit-breaker window and attempt cap. |
+| `--auto-recovery-retry-window` / `-retries` | duration / int | `1h` / `3` | Per-device failure-limiter window and attempt cap. |
 | SC param `recovery.autoRepair` | `"true"`/`"false"` | unset → global default | Per-StorageClass opt-out/opt-in surfaced into volume context; `"false"` opts a volume out. |
 | ConfigMap `tns-csi-recovery` key `enabled` | bool | absent → enabled | Cluster-wide kill switch, watched by the reconciler (pause without redeploy). |
 
@@ -178,8 +176,8 @@ The blast-radius delta is on the **node** ServiceAccount (`-node-role`), which t
 | `""` | `persistentvolumeclaims` | `get`, `list` | Event target + per-PVC policy |
 | `""` | `configmaps` | `get`, `list`, `watch` | cluster kill switch + policy |
 
-The controller role is unchanged. `pods/eviction` is a deliberate upgrade over the daemonset's
-blind `DELETE`.
+The controller role is unchanged. Using `pods/eviction` rather than a raw `pods` `delete` is
+deliberate: the Eviction API respects PodDisruptionBudgets.
 
 ## 7. False-positive strategy
 
@@ -192,8 +190,8 @@ The worst case must destroy nothing. Layered defenses:
 3. **Cheapest-first.** Retry mount → read-only check → non-destructive repair → destructive (only
    behind its own flag).
 4. **Debounce + cooldown** before eviction/repair — kills transient reconnect-window EIO.
-5. **Circuit breakers + rate limits + kill switch** — a false-positive storm is bounded; on
-   breaker-open, stop and surface.
+5. **Failure limiter + rate limits + kill switch** — a false-positive storm is bounded; on budget
+   exhaustion, stop and surface.
 6. **Real-read health probe** distinguishes "mount present but dead" from healthy; confirms the
    globalmount is healthy before blaming a bind mount; only evicts Running, non-terminating pods.
 7. **Shadow mode** runs the full decision logic and emits the action it *would* take, without taking
@@ -205,15 +203,15 @@ The worst case must destroy nothing. Layered defenses:
   client. Default `off`; no behavior change. Unit tests.
 - **Phase B — repair-on-stage:** wire `recoverAndRetryMount` into both block mount-failure branches.
 - **Phase C — reconciler:** shutdown watcher + sweeper + bind healer, with shadow mode.
-- **Phase D — chart + home-ops:** RBAC, node flags, values, docs. In `home-ops-private`, bump the
-  chart, run `shadow` 2–3 weeks, flip `on` per-StorageClass, then node-global, then **delete the
-  DaemonSet, its RBAC, and the audit PVC**.
+- **Phase D — chart + docs:** node RBAC, flags, values, docs. Recommended operator rollout: run
+  `shadow` for 2–3 weeks and eyeball the Events/logs, then flip `on` per-StorageClass, then
+  node-global once confidence is established.
 
 ## 9. Testing
 
 - **Unit (`-race`, table-driven):** repairer command construction + exit-code/output classification
   per fsType (real `xfs_repair -n` / `e2fsck` fixtures); signature parsing (XFS + ext4 kmsg + mount
-  stderr); `mountTracker` stage/unstage/rebuild; circuit-breaker/debounce state machine.
+  stderr); `mountTracker` stage/unstage/rebuild; failure-limiter/debounce state machine.
 - **Integration (real deps):** `losetup` + real `mkfs.xfs`/`mkfs.ext4`; force a shutdown with
   `xfs_io -c shutdown` or a `dmsetup` error target; assert a clean check does **not** mutate and a
   non-destructive repair + remount succeeds.
@@ -228,7 +226,7 @@ The worst case must destroy nothing. Layered defenses:
 |---|---|
 | `pkg/fsrepair/fsrepair.go` | `Repairer` interface; `xfsRepairer`, `extRepairer`; `Outcome` classification |
 | `pkg/fsrepair/signatures.go` | parse XFS/ext4 kmsg + mount-stderr shutdown signatures |
-| `pkg/driver/recovery.go` | `recoverAndRetryMount` state machine, snapshot, Event, circuit breaker |
+| `pkg/driver/recovery.go` | `recoverAndRetryMount` state machine, snapshot, Event, failure limiter |
 | `pkg/driver/recovery_tracker.go` | authoritative `mountTracker` |
 | `pkg/driver/recovery_reconciler.go` | node agent: shutdown watcher, sweeper, bind healer |
 | `pkg/driver/kube_node.go` | node in-cluster client: eviction, PV/PVC lookup, Events, kill switch |

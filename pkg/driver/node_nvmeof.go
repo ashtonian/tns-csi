@@ -594,7 +594,7 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 		// Attempt filesystem auto-recovery. This is a no-op (returns nil) unless
 		// recovery is enabled; on success the device is now mounted, otherwise
 		// the original mount error is surfaced unchanged.
-		if resp := s.recoverAndRetryMount(ctx, recoverParams{
+		resp := s.recoverAndRetryMount(ctx, recoverParams{
 			volumeID:    volumeID,
 			devicePath:  devicePath,
 			stagingPath: stagingTargetPath,
@@ -604,7 +604,8 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 			autoRepair:  volumeContext[VolumeContextKeyAutoRepair],
 			mountOutput: output,
 			remount:     mountFn,
-		}); resp != nil {
+		})
+		if resp != nil {
 			s.trackStagedVolume(volumeID, stagingTargetPath, devicePath, fsType, ProtocolNVMeOF, volumeContext)
 			return resp, nil
 		}

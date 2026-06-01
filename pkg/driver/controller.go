@@ -764,7 +764,8 @@ func applyRecoveryParams(volumeContext, params map[string]string) {
 	if volumeContext == nil {
 		return
 	}
-	if v := params[StorageClassParamAutoRepair]; v != "" {
+	v := params[StorageClassParamAutoRepair]
+	if v != "" {
 		volumeContext[VolumeContextKeyAutoRepair] = v
 	}
 }

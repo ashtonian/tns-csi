@@ -65,10 +65,28 @@ func isCorrupt(lower string) bool { return containsAny(lower, corruptMarkers) }
 // stripJBD2Suffix turns "nvme0n1-8" (JBD2's "<dev>-<journal-inode>" form) back
 // into the bare device "nvme0n1".
 func stripJBD2Suffix(dev string) string {
-	if i := strings.LastIndex(dev, "-"); i > 0 {
+	i := strings.LastIndex(dev, "-")
+	if i > 0 {
 		return dev[:i]
 	}
 	return dev
+}
+
+// kmsgMatcher pairs a device-extracting regexp with the shutdown-marker phrases
+// that qualify a matching line as a real shutdown for that filesystem family.
+type kmsgMatcher struct {
+	re       *regexp.Regexp
+	family   FSFamily
+	markers  []string
+	stripDev func(string) string // optional device-name normalizer
+}
+
+// kmsgMatchers are tried in order; the first regexp that matches decides the
+// family. XFS is checked before the ext/JBD2 forms.
+var kmsgMatchers = []kmsgMatcher{
+	{re: xfsDeviceRe, family: FamilyXFS, markers: xfsShutdownMarkers},
+	{re: ext4DeviceRe, family: FamilyExt, markers: extShutdownMarkers},
+	{re: jbd2DeviceRe, family: FamilyExt, markers: extShutdownMarkers, stripDev: stripJBD2Suffix},
 }
 
 // ParseKmsgLine extracts a ShutdownSignal from a single kernel log line. The
@@ -78,37 +96,21 @@ func ParseKmsgLine(line string) (ShutdownSignal, bool) {
 	trimmed := strings.TrimSpace(line)
 	lower := strings.ToLower(trimmed)
 
-	if m := xfsDeviceRe.FindStringSubmatch(trimmed); m != nil {
-		if !containsAny(lower, xfsShutdownMarkers) {
+	for _, matcher := range kmsgMatchers {
+		groups := matcher.re.FindStringSubmatch(trimmed)
+		if groups == nil {
+			continue
+		}
+		if !containsAny(lower, matcher.markers) {
 			return ShutdownSignal{}, false
 		}
-		return ShutdownSignal{
-			Device:  m[1],
-			Family:  FamilyXFS,
-			Corrupt: isCorrupt(lower),
-			Raw:     trimmed,
-		}, true
-	}
-
-	if m := ext4DeviceRe.FindStringSubmatch(trimmed); m != nil {
-		if !containsAny(lower, extShutdownMarkers) {
-			return ShutdownSignal{}, false
+		device := groups[1]
+		if matcher.stripDev != nil {
+			device = matcher.stripDev(device)
 		}
 		return ShutdownSignal{
-			Device:  m[1],
-			Family:  FamilyExt,
-			Corrupt: isCorrupt(lower),
-			Raw:     trimmed,
-		}, true
-	}
-
-	if m := jbd2DeviceRe.FindStringSubmatch(trimmed); m != nil {
-		if !containsAny(lower, extShutdownMarkers) {
-			return ShutdownSignal{}, false
-		}
-		return ShutdownSignal{
-			Device:  stripJBD2Suffix(m[1]),
-			Family:  FamilyExt,
+			Device:  device,
+			Family:  matcher.family,
 			Corrupt: isCorrupt(lower),
 			Raw:     trimmed,
 		}, true

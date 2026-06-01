@@ -21,35 +21,35 @@ import (
 
 // Config contains the configuration for the driver.
 type Config struct {
-	MetricsAddr               string
-	DashboardAddr             string
+	DriverName                string
+	Version                   string
 	NodeID                    string
 	Endpoint                  string
 	APIURL                    string
 	APIKey                    string
-	Version                   string
-	DashboardPool             string
-	DriverName                string
-	ClusterID                 string
-	Recovery                  RecoveryConfig
-	MaxConcurrentNVMeConnects int
-	TestMode                  bool
-	SkipTLSVerify             bool
-	EnableNVMeDiscovery       bool
+	MetricsAddr               string         // Address to expose Prometheus metrics (e.g., ":8080")
+	DashboardAddr             string         // Address for in-cluster dashboard (e.g., ":9090", empty = disabled)
+	DashboardPool             string         // ZFS pool for unmanaged volume discovery in dashboard
+	ClusterID                 string         // Unique identifier for this cluster (for multi-cluster TrueNAS sharing)
+	TestMode                  bool           // Enable test mode for sanity tests (skips actual mounts)
+	SkipTLSVerify             bool           // Skip TLS certificate verification (for self-signed certs)
+	EnableNVMeDiscovery       bool           // Run nvme discover before nvme connect (default: false)
+	MaxConcurrentNVMeConnects int            // Max concurrent NVMe-oF connect operations per node (default: 5)
+	Recovery                  RecoveryConfig // Filesystem auto-recovery for block volumes (default: off)
 }
 
 // Driver is the TNS CSI driver.
 type Driver struct {
-	apiClient      tnsapi.ClientInterface
 	srv            *grpc.Server
 	metricsSrv     *http.Server
 	dashboardSrv   *dashboard.Server
+	apiClient      tnsapi.ClientInterface
 	controller     *ControllerService
 	node           *NodeService
 	identity       *IdentityService
-	recoveryCancel context.CancelFunc
 	config         Config
-	testMode       bool
+	testMode       bool               // Test mode flag for sanity tests
+	recoveryCancel context.CancelFunc // Cancels the node-side recovery reconciler on shutdown
 }
 
 // NewDriver creates a new driver instance.
@@ -90,7 +90,7 @@ func NewDriverWithClient(cfg Config, client tnsapi.ClientInterface) (*Driver, er
 	if cfg.Recovery.Enabled() {
 		d.node.tracker = newMountTracker(defaultMountTrackerStatePath)
 		d.node.kube = newNodeKubeClient(cfg.NodeID)
-		d.node.breaker = newCircuitBreaker(cfg.Recovery.RetryWindow, cfg.Recovery.MaxRetries)
+		d.node.limiter = newFailureLimiter(cfg.Recovery.RetryWindow, cfg.Recovery.MaxRetries)
 	}
 
 	return d, nil

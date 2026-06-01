@@ -109,7 +109,8 @@ func runFSCmd(ctx context.Context, name string, args ...string) (output string, 
 		return output, 0, nil
 	}
 	// Context deadline/cancel takes precedence over the process error.
-	if ctxErr := ctx.Err(); ctxErr != nil {
+	ctxErr := ctx.Err()
+	if ctxErr != nil {
 		return output, -1, ctxErr
 	}
 	var ee *exec.ExitError

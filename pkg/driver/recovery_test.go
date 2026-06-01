@@ -6,58 +6,58 @@ import (
 	"time"
 )
 
-func TestCircuitBreaker(t *testing.T) {
+func TestFailureLimiter(t *testing.T) {
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	b := newCircuitBreaker(time.Hour, 3)
+	l := newFailureLimiter(time.Hour, 3)
 
-	if b.blocked("nvme0n1", now) {
+	if l.blocked("nvme0n1", now) {
 		t.Fatal("a fresh device must not be blocked")
 	}
 
-	// Three FAILURES within the window open the breaker.
-	for i := 1; i <= 3; i++ {
-		b.recordFailure("nvme0n1", now.Add(time.Duration(i)*time.Minute))
+	// Three failures within the window exhaust the budget.
+	for i := range 3 {
+		l.recordFailure("nvme0n1", now.Add(time.Duration(i+1)*time.Minute))
 	}
-	if !b.blocked("nvme0n1", now.Add(4*time.Minute)) {
-		t.Errorf("device should be blocked after %d failures in window", 3)
+	if !l.blocked("nvme0n1", now.Add(4*time.Minute)) {
+		t.Errorf("device should be blocked after 3 failures in window")
 	}
 
 	// A different device is tracked independently.
-	if b.blocked("nvme1n1", now.Add(4*time.Minute)) {
+	if l.blocked("nvme1n1", now.Add(4*time.Minute)) {
 		t.Errorf("independent device should not be blocked")
 	}
 
-	// A success resets the count — the core fix: a flapping-but-recovering link
-	// must never trip the breaker.
-	b.recordSuccess("nvme0n1")
-	if b.blocked("nvme0n1", now.Add(5*time.Minute)) {
+	// A success resets the count — the core guarantee: a flapping-but-recovering
+	// link must never exhaust its budget.
+	l.recordSuccess("nvme0n1")
+	if l.blocked("nvme0n1", now.Add(5*time.Minute)) {
 		t.Errorf("device must not be blocked after a successful recovery reset it")
 	}
 
 	// Failures age out of the window.
 	for i := range 3 {
-		b.recordFailure("nvme2n1", now.Add(time.Duration(i)*time.Minute))
+		l.recordFailure("nvme2n1", now.Add(time.Duration(i)*time.Minute))
 	}
-	if !b.blocked("nvme2n1", now.Add(3*time.Minute)) {
+	if !l.blocked("nvme2n1", now.Add(3*time.Minute)) {
 		t.Errorf("nvme2n1 should be blocked within window")
 	}
-	if b.blocked("nvme2n1", now.Add(2*time.Hour)) {
-		t.Errorf("breaker should reset after the window elapses")
+	if l.blocked("nvme2n1", now.Add(2*time.Hour)) {
+		t.Errorf("limiter should reset after the window elapses")
 	}
 }
 
-// TestRecoverAndRetryMountSuccessDoesNotTripBreaker locks in the fix for the
-// breaker bug: repeated *successful* recoveries (the flapping-transport case the
+// TestRecoverAndRetryMountSuccessDoesNotExhaustBudget locks in the fix for the
+// limiter bug: repeated *successful* recoveries (the flapping-transport case the
 // feature targets) must never lock a device out, even starting near the limit.
-func TestRecoverAndRetryMountSuccessDoesNotTripBreaker(t *testing.T) {
+func TestRecoverAndRetryMountSuccessDoesNotExhaustBudget(t *testing.T) {
 	s := &NodeService{
 		recovery: RecoveryConfig{Mode: RecoveryOn, RepairTimeout: time.Minute},
-		breaker:  newCircuitBreaker(time.Hour, 3),
+		limiter:  newFailureLimiter(time.Hour, 3),
 	}
-	// Pre-load two failures so a buggy "count every attempt" breaker would trip
-	// on the second call below.
-	s.breaker.recordFailure("nvme0n1", time.Now())
-	s.breaker.recordFailure("nvme0n1", time.Now())
+	// Pre-load two failures so a buggy "count every attempt" limiter would trip on
+	// the second call below.
+	s.limiter.recordFailure("nvme0n1", time.Now())
+	s.limiter.recordFailure("nvme0n1", time.Now())
 
 	for i := range 5 {
 		resp := s.recoverAndRetryMount(context.Background(), recoverParams{

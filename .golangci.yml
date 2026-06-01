@@ -107,7 +107,12 @@ linters:
       
     govet:
       enable-all: true
-      
+      disable:
+        # fieldalignment micro-optimizes struct padding (mostly on singletons
+        # here) at the cost of readability — it forces non-logical field order
+        # and strips trailing field comments. Not worth it; group fields by meaning.
+        - fieldalignment
+
     gocyclo:
       min-complexity: 26
       
