@@ -172,6 +172,10 @@ CI enforces test coverage with [go-test-coverage](https://github.com/vladopajic/
 
 Run it locally with `make coverage-check`. When your change raises a package's coverage, raise its floor in `.testcoverage.yml` to the new value minus one point in the same PR. Never lower a floor; add tests instead.
 
+### `//nolint` budget
+
+`nolint-budget.txt` records how many `//nolint` directives each linter has under `pkg/` and `cmd/`. CI (`make nolint-budget`) fails if a count grows or a new linter is suppressed. Fix the code instead. It also fails if a count shrinks without the budget being lowered. When you remove directives, run `make nolint-budget-update` and commit the new budget so it cannot creep back.
+
 ### Linting
 
 ```bash

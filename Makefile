@@ -74,6 +74,15 @@ lint-verbose:
 	@echo "Running golangci-lint (verbose)..."
 	$(GOLANGCI_LINT) run --config .golangci.yml -v ./...
 
+# Ratchet on //nolint directives (see nolint-budget.txt). After removing directives,
+# run `make nolint-budget-update` and commit the lowered budget.
+nolint-budget:
+	bash scripts/ci/nolint-budget_test.sh >/dev/null
+	bash scripts/ci/nolint-budget.sh
+
+nolint-budget-update:
+	bash scripts/ci/nolint-budget.sh --update
+
 deps:
 	@echo "Downloading dependencies..."
 	$(GOMOD) download

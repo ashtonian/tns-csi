@@ -130,6 +130,9 @@ jobs:
           version: ${{ steps.lintver.outputs.version }}
           args: --config .golangci.yml
 
+      - name: nolint budget
+        run: make nolint-budget
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
