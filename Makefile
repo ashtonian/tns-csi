@@ -1,5 +1,7 @@
-.PHONY: all build build-plugin clean deps install test test-unit test-scripts test-sanity test-all test-coverage \
-	docker-build docker-push lint lint-fix lint-verbose mod-tidy-check vulncheck check \
+.PHONY: all build build-plugin clean deps install test test-unit test-scripts test-sanity test-all \
+	test-coverage coverage coverage-check \
+	docker-build docker-push lint lint-fix lint-verbose nolint-budget nolint-budget-update \
+	mod-tidy-check vulncheck check \
 	test-e2e test-e2e-nfs test-e2e-nvmeof test-e2e-iscsi test-e2e-smb test-e2e-scale test-e2e-snapclone \
 	changelog changelog-unreleased
 
@@ -125,12 +127,27 @@ vulncheck:
 check: build lint mod-tidy-check test-unit test-scripts test-sanity
 	@echo "All checks passed"
 
-test-coverage:
-	@echo "Running tests with coverage (for SonarQube)..."
-	$(GOTEST) -v -short -coverprofile=coverage.out -covermode=atomic ./pkg/...
-	$(GOTEST) -v -short -json ./pkg/... > test-report.json || true
+# Coverage profile for the driver and CLI packages (consumed by coverage-check and SonarQube).
+coverage:
+	@echo "Running tests with coverage..."
+	$(GOTEST) -short -coverprofile=coverage.out -covermode=atomic ./pkg/... ./cmd/...
 	@echo "Coverage report: coverage.out"
+
+# Coverage + JSON test report for SonarQube.
+test-coverage: coverage
+	$(GOTEST) -v -short -json ./pkg/... > test-report.json || true
 	@echo "Test report: test-report.json"
+
+# Coverage ratchet: enforce the floors in .testcoverage.yml.
+# COVERAGE_BREAKDOWN=<file>       also write a breakdown (CI uploads it from main).
+# COVERAGE_BASE_BREAKDOWN=<file>  also fail if total coverage drops below that breakdown.
+GO_TEST_COVERAGE_VERSION ?= v2.20.0
+COVERAGE_BREAKDOWN ?=
+COVERAGE_BASE_BREAKDOWN ?=
+coverage-check: coverage
+	$(GOCMD) run github.com/vladopajic/go-test-coverage/v2@$(GO_TEST_COVERAGE_VERSION) --config=.testcoverage.yml \
+		$(if $(COVERAGE_BREAKDOWN),--breakdown-file-name=$(COVERAGE_BREAKDOWN)) \
+		$(if $(COVERAGE_BASE_BREAKDOWN),--diff-base-breakdown-file-name=$(COVERAGE_BASE_BREAKDOWN) --diff-threshold=0)
 
 test-all: test-unit test-sanity
 	@echo "All tests completed"
