@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/retry"
 	"k8s.io/klog/v2"
 )
@@ -27,7 +27,7 @@ func (s *NodeService) connectNVMeOFTarget(ctx context.Context, params *nvmeOFCon
 		klog.V(4).Infof("Discovering NVMe-oF target at %s:%s", params.server, params.port)
 		discoverCtx, discoverCancel := context.WithTimeout(ctx, 15*time.Second)
 		defer discoverCancel()
-		discoverCmd := exec.CommandContext(discoverCtx, "nvme", "discover", "-t", params.transport, "-a", params.server, "-s", params.port)
+		discoverCmd := cmdexec.CommandContext(discoverCtx, "nvme", "discover", "-t", params.transport, "-a", params.server, "-s", params.port)
 		if output, discoverErr := discoverCmd.CombinedOutput(); discoverErr != nil {
 			klog.Warningf("NVMe discover failed (this may be OK if target is already known): %v, output: %s", discoverErr, string(output))
 		}
@@ -102,7 +102,7 @@ func (s *NodeService) attemptNVMeConnect(ctx context.Context, params *nvmeOFConn
 		klog.V(4).Infof("Using custom queue-size=%s for NVMe-oF connection", params.queueSize)
 	}
 
-	connectCmd := exec.CommandContext(connectCtx, "nvme", connectArgs...)
+	connectCmd := cmdexec.CommandContext(connectCtx, "nvme", connectArgs...)
 	output, err := connectCmd.CombinedOutput()
 	if err != nil {
 		// Check if already connected (this is success, not an error)
@@ -123,7 +123,8 @@ func isRetryableNVMeConnectError(err error) bool {
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
+	// nvme-cli prints libc messages capitalised ("Connection refused"); match case-insensitively.
+	errStr := strings.ToLower(err.Error())
 
 	// These errors indicate the subsystem isn't ready yet (transient)
 	retryablePatterns := []string{
@@ -137,7 +138,7 @@ func isRetryableNVMeConnectError(err error) bool {
 	}
 
 	for _, pattern := range retryablePatterns {
-		if strings.Contains(errStr, pattern) {
+		if strings.Contains(errStr, strings.ToLower(pattern)) {
 			return true
 		}
 	}
@@ -149,7 +150,7 @@ func isRetryableNVMeConnectError(err error) bool {
 func (s *NodeService) checkNVMeCLI(ctx context.Context) error {
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(checkCtx, "nvme", "version")
+	cmd := cmdexec.CommandContext(checkCtx, "nvme", "version")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%w: %w", ErrNVMeCLINotFound, err)
 	}
@@ -171,7 +172,7 @@ func (s *NodeService) disconnectNVMeOF(ctx context.Context, nqn string) error {
 	disconnectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(disconnectCtx, "nvme", "disconnect", "-n", nqn)
+	cmd := cmdexec.CommandContext(disconnectCtx, "nvme", "disconnect", "-n", nqn)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// nvme-cli error text varies by version. Verify the kernel state instead
@@ -287,7 +288,7 @@ func (s *NodeService) rescanNVMeNamespace(ctx context.Context, devicePath string
 	rescanCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(rescanCtx, "nvme", "ns-rescan", controllerPath)
+	cmd := cmdexec.CommandContext(rescanCtx, "nvme", "ns-rescan", controllerPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.V(4).Infof("nvme ns-rescan failed for %s: %v, output: %s (this may be OK)", controllerPath, err, string(output))

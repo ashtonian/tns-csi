@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
+
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 )
 
 // getSubsystemState returns the connection state of an NVMe subsystem ("live", "connecting", etc.)
@@ -21,7 +22,7 @@ func getSubsystemState(ctx context.Context, nqn string) string {
 	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
+	cmd := cmdexec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.V(4).Infof("nvme list-subsys failed: %v", err)
@@ -158,7 +159,7 @@ func triggerUdevForNVMeSubsystem(ctx context.Context) {
 	// Trigger udev to process any new NVMe devices
 	triggerCtx, triggerCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer triggerCancel()
-	triggerCmd := exec.CommandContext(triggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=nvme")
+	triggerCmd := cmdexec.CommandContext(triggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=nvme")
 	if output, err := triggerCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm trigger for NVMe subsystem failed: %v, output: %s (continuing anyway)", err, string(output))
 	} else {
@@ -168,7 +169,7 @@ func triggerUdevForNVMeSubsystem(ctx context.Context) {
 	// Also trigger block subsystem in case block devices need processing
 	blockTriggerCtx, blockTriggerCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer blockTriggerCancel()
-	blockTriggerCmd := exec.CommandContext(blockTriggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=block")
+	blockTriggerCmd := cmdexec.CommandContext(blockTriggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=block")
 	if output, err := blockTriggerCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm trigger for block subsystem failed: %v, output: %s (continuing anyway)", err, string(output))
 	} else {
@@ -178,7 +179,7 @@ func triggerUdevForNVMeSubsystem(ctx context.Context) {
 	// Wait for udev to settle (process the events)
 	settleCtx, settleCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer settleCancel()
-	settleCmd := exec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=10")
+	settleCmd := cmdexec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=10")
 	if output, err := settleCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm settle failed: %v, output: %s (continuing anyway)", err, string(output))
 	} else {
@@ -213,7 +214,7 @@ func (s *NodeService) findNVMeDeviceByNQN(ctx context.Context, nqn string) (stri
 func (s *NodeService) runNVMeListSubsys(ctx context.Context) ([]byte, error) {
 	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	subsysCmd := exec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
+	subsysCmd := cmdexec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
 	return subsysCmd.CombinedOutput()
 }
 
@@ -326,7 +327,7 @@ func (s *NodeService) forceNamespaceRescan(ctx context.Context, controllerPath s
 
 	klog.V(4).Infof("Forcing namespace rescan on controller %s", controllerPath)
 
-	cmd := exec.CommandContext(rescanCtx, "nvme", "ns-rescan", controllerPath)
+	cmd := cmdexec.CommandContext(rescanCtx, "nvme", "ns-rescan", controllerPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.V(4).Infof("nvme ns-rescan failed for %s: %v, output: %s (continuing anyway)", controllerPath, err, string(output))
@@ -458,7 +459,7 @@ func (s *NodeService) logNVMeDiscoveryDiagnostics(ctx context.Context, nqn strin
 	// Run nvme list-subsys
 	subsysCtx, subsysCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer subsysCancel()
-	subsysCmd := exec.CommandContext(subsysCtx, "nvme", "list-subsys")
+	subsysCmd := cmdexec.CommandContext(subsysCtx, "nvme", "list-subsys")
 	if output, err := subsysCmd.CombinedOutput(); err == nil {
 		klog.V(2).Infof("nvme list-subsys output:\n%s", string(output))
 	} else {
@@ -468,7 +469,7 @@ func (s *NodeService) logNVMeDiscoveryDiagnostics(ctx context.Context, nqn strin
 	// Run nvme list to show actual namespace devices
 	listCtx, listCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer listCancel()
-	listCmd := exec.CommandContext(listCtx, "nvme", "list")
+	listCmd := cmdexec.CommandContext(listCtx, "nvme", "list")
 	if output, err := listCmd.CombinedOutput(); err == nil {
 		klog.V(2).Infof("nvme list output:\n%s", string(output))
 	} else {
@@ -502,12 +503,10 @@ func (s *NodeService) logNVMeDiscoveryDiagnostics(ctx context.Context, nqn strin
 		}
 	}
 
-	// List /dev/nvme* devices
-	devCtx, devCancel := context.WithTimeout(ctx, 3*time.Second)
-	defer devCancel()
-	devCmd := exec.CommandContext(devCtx, "ls", "-la", "/dev/nvme*")
-	if output, err := devCmd.CombinedOutput(); err == nil {
-		klog.V(2).Infof("/dev/nvme* devices:\n%s", string(output))
+	// List /dev/nvme* devices. (This used to exec "ls /dev/nvme*" without a shell, so the
+	// glob was never expanded and the diagnostic always failed.)
+	if devices, err := filepath.Glob("/dev/nvme*"); err == nil {
+		klog.V(2).Infof("/dev/nvme* devices: %v", devices)
 	}
 
 	klog.V(2).Infof("=== End NVMe Diagnostics ===")
@@ -519,7 +518,7 @@ func (s *NodeService) isDeviceHealthy(ctx context.Context, devicePath string) bo
 	sizeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
+	cmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
