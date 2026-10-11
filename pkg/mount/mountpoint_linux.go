@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	mountutils "k8s.io/mount-utils"
 )
@@ -41,32 +42,54 @@ func lookupMount(mountInfoFile, target string) (Entry, bool, error) {
 		return Entry{}, false, fmt.Errorf("failed to read mount table %s: %w", mountInfoFile, err)
 	}
 	target = filepath.Clean(target)
-	var (
-		entry Entry
-		found bool
-	)
-	// Later lines are mounted on top of earlier ones; keep the last match.
+	var matches []mountutils.MountInfo
 	for i := range infos {
-		if filepath.Clean(unescapeMountField(infos[i].MountPoint)) != target {
-			continue
+		if filepath.Clean(unescapeMountField(infos[i].MountPoint)) == target {
+			matches = append(matches, infos[i])
 		}
-		entry = Entry{Source: unescapeMountField(infos[i].Source), FSType: infos[i].FsType}
-		found = true
 	}
-	return entry, found, nil
+	if len(matches) == 0 {
+		return Entry{}, false, nil
+	}
+	top := topmostMount(matches)
+	return Entry{Source: unescapeMountField(top.Source), FSType: top.FsType}, true, nil
+}
+
+// topmostMount picks the visible mount from mounts stacked on one mount point. A mount
+// stacked on another has that mount's ID as its parent ID, so the topmost one is the
+// mount no other match sits on. Line order is not reliable for this ("mount --move" and
+// propagated mounts can list an upper mount first); it is only the fallback when the
+// parent chain does not single out one mount.
+func topmostMount(matches []mountutils.MountInfo) mountutils.MountInfo {
+	isParent := make(map[int]bool, len(matches))
+	for i := range matches {
+		isParent[matches[i].ParentID] = true
+	}
+	var tops []int
+	for i := range matches {
+		if !isParent[matches[i].ID] {
+			tops = append(tops, i)
+		}
+	}
+	if len(tops) == 1 {
+		return matches[tops[0]]
+	}
+	return matches[len(matches)-1]
 }
 
 // canonicalMountTarget resolves symlinks in path's parent directories (e.g. a
 // /var/lib/kubelet that is a symlink) so the result matches the mount table, which
 // always records real paths. The final component is never stat'ed: it may be a mount
-// point of an unresponsive server. A missing parent cannot contain a mount point, so
-// the cleaned path is returned unchanged and will simply not match.
+// point of an unresponsive server. A missing parent, or a parent that is not a
+// directory, cannot contain a mount point, so the cleaned path is returned unchanged and
+// will simply not match.
 func canonicalMountTarget(path string) (string, error) {
 	clean := filepath.Clean(path)
 	parent, base := filepath.Dir(clean), filepath.Base(clean)
 	resolved, err := filepath.EvalSymlinks(parent)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		// A missing parent, or one that is a regular file (ENOTDIR), cannot contain a mount point.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			return clean, nil
 		}
 		return "", fmt.Errorf("failed to resolve parent of %s: %w", path, err)
