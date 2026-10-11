@@ -127,7 +127,8 @@ runs:
           # NodeStageVolume — every /dev/sd* gets wrapped as a dm-* device.
           - apt-get purge -y multipath-tools || true
           - systemctl enable --now iscsid
-          - for attempt in 1 2 3; do curl --retry 5 --retry-all-errors --connect-timeout 15 --max-time 300 -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644 --disable=traefik --disable=local-storage" sh - && break; [ "\$attempt" -eq 3 ] && exit 1; sleep 10; done
+          # Pin the release to avoid the update.k3s.io channel lookup during VM setup.
+          - for attempt in 1 2 3; do curl --retry 5 --retry-all-errors --connect-timeout 15 --max-time 300 -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.37.1+k3s1" INSTALL_K3S_EXEC="--write-kubeconfig-mode 644 --disable=traefik --disable=local-storage" sh - && break; [ "\$attempt" -eq 3 ] && exit 1; sleep 10; done
           - for attempt in \$(seq 1 150); do kubectl get nodes --no-headers 2>/dev/null | grep -q ' Ready' && break; [ "\$attempt" -eq 150 ] && exit 1; sleep 2; done
           - echo "K3S_READY" > /tmp/k3s-ready
         EOF
