@@ -219,12 +219,12 @@ func validateNVMeOFParams(req *csi.CreateVolumeRequest) (*nvmeofVolumeParams, er
 
 // findExistingNVMeOFNamespace finds an existing namespace for a ZVOL in a subsystem.
 func (s *ControllerService) findExistingNVMeOFNamespace(ctx context.Context, devicePath string, subsystemID int) (*tnsapi.NVMeOFNamespace, error) {
-	namespaces, err := s.apiClient.QueryAllNVMeOFNamespaces(ctx)
+	namespaces, err := s.apiClient.QueryNVMeOFNamespaces(ctx, subsystemNamespacesFilter(subsystemID))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to query NVMe-oF namespaces: %v", err)
 	}
 
-	klog.V(4).Infof("Checking for existing namespace: device=%s, subsystem=%d, total namespaces=%d", devicePath, subsystemID, len(namespaces))
+	klog.V(4).Infof("Checking for existing namespace: device=%s, subsystem=%d, namespaces in subsystem=%d", devicePath, subsystemID, len(namespaces))
 
 	// Log all namespaces for this subsystem to help diagnose NSID conflicts
 	subsystemNamespaces := 0
@@ -869,7 +869,7 @@ func (s *ControllerService) deleteNVMeOFSubsystem(ctx context.Context, meta *Vol
 
 	// Step 1: Verify no namespaces are attached to this subsystem
 	// TrueNAS will refuse to delete subsystems with active namespaces
-	namespaces, err := s.apiClient.QueryAllNVMeOFNamespaces(ctx)
+	namespaces, err := s.apiClient.QueryNVMeOFNamespaces(ctx, subsystemNamespacesFilter(meta.NVMeOFSubsystemID))
 	if err != nil {
 		klog.Warningf("Failed to query namespaces for subsystem cleanup verification (continuing anyway): %v", err)
 	} else {
@@ -1442,4 +1442,10 @@ func (s *ControllerService) expandNVMeOFVolume(ctx context.Context, meta *Volume
 		CapacityBytes:         requiredBytes,
 		NodeExpansionRequired: true, // NVMe-oF volumes require node-side filesystem expansion
 	}, nil
+}
+
+// subsystemNamespacesFilter selects the namespaces of one subsystem (nvmet.namespace.query).
+// Callers still check GetSubsystemID() client-side.
+func subsystemNamespacesFilter(subsystemID int) []interface{} {
+	return []interface{}{[]interface{}{"subsys_id", "=", subsystemID}}
 }

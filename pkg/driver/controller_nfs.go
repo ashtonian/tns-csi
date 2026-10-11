@@ -307,7 +307,7 @@ func (s *ControllerService) handleExistingNFSVolume(ctx context.Context, params 
 	klog.V(4).Infof("Dataset %s already exists (ID: %s), checking idempotency", params.datasetName, existingDataset.ID)
 
 	// Check if an NFS share exists for this dataset
-	existingShares, err := s.apiClient.QueryAllNFSShares(ctx, existingDataset.Mountpoint)
+	existingShares, err := s.apiClient.QueryNFSShares(ctx, []interface{}{[]interface{}{"path", "=", existingDataset.Mountpoint}})
 	if err != nil {
 		timer.ObserveError()
 		return nil, false, status.Errorf(codes.Internal, "Failed to query existing NFS shares: %v", err)

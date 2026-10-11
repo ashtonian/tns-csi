@@ -1937,19 +1937,18 @@ func (c *Client) QueryNVMeOFNamespaceByID(ctx context.Context, namespaceID int) 
 func (c *Client) QueryNVMeOFSubsystem(ctx context.Context, nqn string) ([]NVMeOFSubsystem, error) {
 	klog.V(4).Infof("Querying NVMe-oF subsystems for NQN: %s", nqn)
 
-	// List all subsystems - server-side filtering doesn't work reliably
-	// because the NQN field name varies between TrueNAS versions
-	allSubsystems, err := c.ListAllNVMeOFSubsystems(ctx)
+	// Filter on 'name' (the short NQN without the UUID prefix) on the server. The API
+	// response has both:
+	// - 'name': short NQN (e.g., "nqn.2005-03.org.truenas:csi-test")
+	// - 'subnqn': full NQN with UUID prefix (e.g., "nqn.2011-06.com.truenas:uuid:<uuid>:nqn.2005-03.org.truenas:csi-test")
+	subsystems, err := c.QueryNVMeOFSubsystems(ctx, []interface{}{[]interface{}{filterFieldName, "=", nqn}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list subsystems: %w", err)
 	}
 
-	// Filter client-side by matching the 'name' field (short NQN without UUID prefix)
-	// The API response has both:
-	// - 'name': short NQN (e.g., "nqn.2005-03.org.truenas:csi-test")
-	// - 'subnqn': full NQN with UUID prefix (e.g., "nqn.2011-06.com.truenas:uuid:<uuid>:nqn.2005-03.org.truenas:csi-test")
+	// Re-check client-side; cheap, and keeps the result exact if a server ever ignores the filter.
 	var result []NVMeOFSubsystem
-	for _, sub := range allSubsystems {
+	for _, sub := range subsystems {
 		if sub.Name == nqn {
 			result = append(result, sub)
 		}
@@ -1966,36 +1965,11 @@ func (c *Client) NVMeOFSubsystemByNQN(ctx context.Context, nqn string) (*NVMeOFS
 
 	subsystems, err := c.QueryNVMeOFSubsystem(ctx, nqn)
 	if err != nil {
-		klog.Errorf("Failed to query NVMe-oF subsystem: %v", err)
-
-		// Try to list all subsystems for debugging
-		klog.Infof("Attempting to list all NVMe-oF subsystems for debugging...")
-		allSubsystems, listErr := c.ListAllNVMeOFSubsystems(ctx)
-		if listErr != nil {
-			klog.Errorf("Failed to list all subsystems: %v", listErr)
-		} else {
-			klog.Infof("Found %d total NVMe-oF subsystems:", len(allSubsystems))
-			for _, sub := range allSubsystems {
-				klog.Infof("  - ID=%d, NQN=%s", sub.ID, sub.NQN)
-			}
-		}
-
 		return nil, fmt.Errorf("failed to query subsystem: %w", err)
 	}
-
 	if len(subsystems) == 0 {
-		// Try listing all subsystems to help with debugging
-		klog.Warningf("No subsystems found with NQN %s, listing all subsystems...", nqn)
-		allSubsystems, listErr := c.ListAllNVMeOFSubsystems(ctx)
-		if listErr == nil {
-			klog.Infof("Found %d total NVMe-oF subsystems:", len(allSubsystems))
-			for _, sub := range allSubsystems {
-				klog.Infof("  - ID=%d, Name=%s, FullNQN=%s", sub.ID, sub.Name, sub.NQN)
-			}
-		}
 		return nil, fmt.Errorf("%w: NQN %s", ErrSubsystemNotFound, nqn)
 	}
-
 	if len(subsystems) > 1 {
 		return nil, fmt.Errorf("%w: NQN %s (expected 1, found %d)", ErrMultipleSubsystems, nqn, len(subsystems))
 	}
@@ -2480,36 +2454,11 @@ func (c *Client) QueryAllNFSShares(ctx context.Context, pathFilter string) ([]NF
 
 // QueryAllNVMeOFNamespaces queries all NVMe-oF namespaces.
 func (c *Client) QueryAllNVMeOFNamespaces(ctx context.Context) ([]NVMeOFNamespace, error) {
-	klog.V(5).Info("Querying all NVMe-oF namespaces")
-
-	// First, get raw JSON to debug the actual field names
-	var rawResult json.RawMessage
-	err := c.Call(ctx, "nvmet.namespace.query", []interface{}{}, &rawResult)
+	result, err := c.QueryNVMeOFNamespaces(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query NVMe-oF namespaces: %w", err)
+		return nil, err
 	}
-
-	// Log raw JSON for debugging (first 2000 chars to avoid log spam)
-	rawStr := string(rawResult)
-	if len(rawStr) > 2000 {
-		rawStr = rawStr[:2000] + "..."
-	}
-	klog.Infof("QueryAllNVMeOFNamespaces: Raw JSON response: %s", rawStr)
-
-	// Now unmarshal into our struct
-	var result []NVMeOFNamespace
-	if err := json.Unmarshal(rawResult, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal NVMe-oF namespaces: %w", err)
-	}
-
-	klog.Infof("QueryAllNVMeOFNamespaces: Found %d NVMe-oF namespaces", len(result))
-	// Log first 3 namespaces for debugging
-	for i, ns := range result {
-		if i >= 3 {
-			break
-		}
-		klog.Infof("QueryAllNVMeOFNamespaces: Sample namespace %d: ID=%d, Device='%s', DevicePath='%s', SubsystemID=%d, SubsystemNQN='%s', NSID=%d", i, ns.ID, ns.Device, ns.DevicePath, ns.GetSubsystemID(), ns.GetSubsystemNQN(), ns.NSID)
-	}
+	klog.V(5).Infof("QueryAllNVMeOFNamespaces: found %d NVMe-oF namespaces", len(result))
 	return result, nil
 }
 
@@ -3473,4 +3422,53 @@ func (c *Client) ReloadSMBService(ctx context.Context) error {
 
 	klog.V(4).Infof("SMB/CIFS service reload completed (job ID: %d)", jobID)
 	return nil
+}
+
+// queryFilters returns filters, or an empty filter list when filters is nil
+// (TrueNAS expects either no params or a valid filter array).
+func queryFilters(filters []interface{}) []interface{} {
+	if filters == nil {
+		return []interface{}{}
+	}
+	return filters
+}
+
+// QueryNFSShares returns the NFS shares matching filters (TrueNAS query-filters, e.g.
+// [["path", "=", "/mnt/tank/pvc-1"]]). Prefer this over QueryAllNFSShares whenever the
+// caller is looking for specific shares.
+func (c *Client) QueryNFSShares(ctx context.Context, filters []interface{}) ([]NFSShare, error) {
+	var result []NFSShare
+	if err := c.Call(ctx, "sharing.nfs.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("failed to query NFS shares: %w", err)
+	}
+	return result, nil
+}
+
+// QuerySMBShares returns the SMB shares matching filters.
+func (c *Client) QuerySMBShares(ctx context.Context, filters []interface{}) ([]SMBShare, error) {
+	var result []SMBShare
+	if err := c.Call(ctx, "sharing.smb.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("failed to query SMB shares: %w", err)
+	}
+	return result, nil
+}
+
+// QueryNVMeOFNamespaces returns the NVMe-oF namespaces matching filters, e.g.
+// [["subsys_id", "=", 7]].
+func (c *Client) QueryNVMeOFNamespaces(ctx context.Context, filters []interface{}) ([]NVMeOFNamespace, error) {
+	var result []NVMeOFNamespace
+	if err := c.Call(ctx, "nvmet.namespace.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("failed to query NVMe-oF namespaces: %w", err)
+	}
+	return result, nil
+}
+
+// QueryNVMeOFSubsystems returns the NVMe-oF subsystems matching filters, e.g.
+// [["id", "=", 7]] or [["name", "=", nqn]].
+func (c *Client) QueryNVMeOFSubsystems(ctx context.Context, filters []interface{}) ([]NVMeOFSubsystem, error) {
+	var result []NVMeOFSubsystem
+	if err := c.Call(ctx, "nvmet.subsys.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrListSubsystemsFailed, err)
+	}
+	return result, nil
 }

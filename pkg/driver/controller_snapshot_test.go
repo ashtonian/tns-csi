@@ -59,6 +59,10 @@ type MockAPIClientForSnapshots struct {
 	DeleteISCSITargetFunc          func(ctx context.Context, id int) error
 	GetDatasetPropertiesFunc       func(ctx context.Context, datasetID string, propertyNames []string) (map[string]string, error)
 	SetDatasetPropertiesFunc       func(ctx context.Context, datasetID string, properties map[string]string) error
+	QueryNFSSharesFunc             func(ctx context.Context, filters []interface{}) ([]tnsapi.NFSShare, error)
+	QuerySMBSharesFunc             func(ctx context.Context, filters []interface{}) ([]tnsapi.SMBShare, error)
+	QueryNVMeOFNamespacesFunc      func(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFNamespace, error)
+	QueryNVMeOFSubsystemsFunc      func(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFSubsystem, error)
 }
 
 func (m *MockAPIClientForSnapshots) CreateSnapshot(ctx context.Context, params tnsapi.SnapshotCreateParams) (*tnsapi.Snapshot, error) {
@@ -122,6 +126,20 @@ func (m *MockAPIClientForSnapshots) DeleteDataset(ctx context.Context, datasetID
 func (m *MockAPIClientForSnapshots) Dataset(ctx context.Context, datasetID string) (*tnsapi.Dataset, error) {
 	if m.GetDatasetFunc != nil {
 		return m.GetDatasetFunc(ctx, datasetID)
+	}
+	// Tests that describe datasets with QueryAllDatasetsFunc get the exact-ID view of the
+	// same fixture, which is what pool.dataset.query with ["id", "=", id] returns.
+	if m.QueryAllDatasetsFunc != nil {
+		datasets, err := m.QueryAllDatasetsFunc(ctx, datasetID)
+		if err != nil {
+			return nil, err
+		}
+		for i := range datasets {
+			if datasets[i].ID == datasetID {
+				return &datasets[i], nil
+			}
+		}
+		return nil, tnsapi.ErrDatasetNotFound
 	}
 	return nil, errors.New("DatasetFunc not implemented")
 }
@@ -1500,4 +1518,34 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// Filtered queries use their hook when set; otherwise they fall back to the unfiltered
+// list (callers re-check matches client-side).
+func (m *MockAPIClientForSnapshots) QueryNFSShares(ctx context.Context, filters []interface{}) ([]tnsapi.NFSShare, error) {
+	if m.QueryNFSSharesFunc != nil {
+		return m.QueryNFSSharesFunc(ctx, filters)
+	}
+	return m.QueryAllNFSShares(ctx, "")
+}
+
+func (m *MockAPIClientForSnapshots) QuerySMBShares(ctx context.Context, filters []interface{}) ([]tnsapi.SMBShare, error) {
+	if m.QuerySMBSharesFunc != nil {
+		return m.QuerySMBSharesFunc(ctx, filters)
+	}
+	return m.QueryAllSMBShares(ctx, "")
+}
+
+func (m *MockAPIClientForSnapshots) QueryNVMeOFNamespaces(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFNamespace, error) {
+	if m.QueryNVMeOFNamespacesFunc != nil {
+		return m.QueryNVMeOFNamespacesFunc(ctx, filters)
+	}
+	return m.QueryAllNVMeOFNamespaces(ctx)
+}
+
+func (m *MockAPIClientForSnapshots) QueryNVMeOFSubsystems(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFSubsystem, error) {
+	if m.QueryNVMeOFSubsystemsFunc != nil {
+		return m.QueryNVMeOFSubsystemsFunc(ctx, filters)
+	}
+	return m.ListAllNVMeOFSubsystems(ctx)
 }

@@ -559,8 +559,11 @@ func (s *ControllerService) discoverVolumeBySearching(ctx context.Context, volum
 		return &volumeDiscoveryResult{datasetName: meta.DatasetName, protocol: meta.Protocol}
 	}
 
-	// Fallback for unmigrated volumes: search NFS shares, SMB shares, NVMe-oF namespaces, iSCSI extents
-	shares, err := s.apiClient.QueryAllNFSShares(ctx, volumeID)
+	// Fallback for unmigrated volumes: search NFS shares, SMB shares, NVMe-oF namespaces and
+	// iSCSI extents whose path ends in the volume name ("$" is TrueNAS's ends-with filter).
+	// The client-side checks below stay as the authoritative match.
+	pathSuffix := "/" + volumeID
+	shares, err := s.apiClient.QueryNFSShares(ctx, []interface{}{[]interface{}{"path", "$", pathSuffix}})
 	if err == nil && len(shares) > 0 {
 		for _, share := range shares {
 			if strings.HasSuffix(share.Path, "/"+volumeID) {
@@ -573,7 +576,7 @@ func (s *ControllerService) discoverVolumeBySearching(ctx context.Context, volum
 		}
 	}
 
-	smbShares, err := s.apiClient.QueryAllSMBShares(ctx, volumeID)
+	smbShares, err := s.apiClient.QuerySMBShares(ctx, []interface{}{[]interface{}{"path", "$", pathSuffix}})
 	if err == nil && len(smbShares) > 0 {
 		for _, share := range smbShares {
 			if strings.HasSuffix(share.Path, "/"+volumeID) {
@@ -586,7 +589,7 @@ func (s *ControllerService) discoverVolumeBySearching(ctx context.Context, volum
 		}
 	}
 
-	namespaces, err := s.apiClient.QueryAllNVMeOFNamespaces(ctx)
+	namespaces, err := s.apiClient.QueryNVMeOFNamespaces(ctx, []interface{}{[]interface{}{"device_path", "$", pathSuffix}})
 	if err == nil {
 		for _, ns := range namespaces {
 			devicePath := ns.GetDevice()
@@ -599,7 +602,7 @@ func (s *ControllerService) discoverVolumeBySearching(ctx context.Context, volum
 		}
 	}
 
-	extents, err := s.apiClient.QueryISCSIExtents(ctx, nil)
+	extents, err := s.apiClient.QueryISCSIExtents(ctx, []interface{}{[]interface{}{"disk", "$", pathSuffix}})
 	if err == nil {
 		for _, extent := range extents {
 			if strings.Contains(extent.Disk, volumeID) {

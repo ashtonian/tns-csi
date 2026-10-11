@@ -2060,8 +2060,8 @@ func (s *ControllerService) getNVMeOFVolumeInfo(ctx context.Context, meta *Volum
 			klog.V(4).Infof("NVMe-oF subsystem %d is healthy (NQN: %s)", foundSubsystem.ID, foundSubsystem.NQN)
 		}
 	} else if meta.NVMeOFSubsystemID > 0 {
-		// Fallback: no NQN stored, list all subsystems to find by ID
-		subsystems, err := s.apiClient.ListAllNVMeOFSubsystems(ctx)
+		// Fallback: no NQN stored, look the subsystem up by ID
+		subsystems, err := s.apiClient.QueryNVMeOFSubsystems(ctx, []interface{}{[]interface{}{"id", "=", meta.NVMeOFSubsystemID}})
 		if err != nil {
 			return nil, VolumeHealth{}, status.Errorf(codes.Internal, "Failed to query NVMe-oF subsystems: %v", err)
 		}
