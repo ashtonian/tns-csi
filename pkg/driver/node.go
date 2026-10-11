@@ -267,7 +267,7 @@ func (s *NodeService) detectProtocolFromStagingPath(ctx context.Context, staging
 	}
 
 	// Check if it's mounted
-	mounted, err := mount.IsMounted(ctx, stagingPath)
+	_, mounted, err := lookupMountedEntry(ctx, stagingPath)
 	if err != nil || !mounted {
 		// Not mounted or error - check if there's a block device symlink
 		// For block volumes, the staging path is a symlink to the device
@@ -678,7 +678,7 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	}
 
 	// Check if the path is mounted
-	mounted, err := mount.IsMounted(ctx, volumePath)
+	_, mounted, err := lookupMountedEntry(ctx, volumePath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to check if path is mounted: %v", err)
 	}
@@ -714,14 +714,14 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	// Detect filesystem type
 	fsType, err := detectFilesystemType(ctx, volumePath)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to detect filesystem type: %v", err)
+		return nil, keepStatus(err, codes.Internal, "Failed to detect filesystem type")
 	}
 
 	klog.V(4).Infof("Detected filesystem type: %s", fsType)
 
 	// Resize based on filesystem type
 	if err := resizeFilesystem(ctx, volumePath, fsType); err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to resize filesystem: %v", err)
+		return nil, keepStatus(err, codes.Internal, "Failed to resize filesystem")
 	}
 
 	klog.V(4).Infof("Resized filesystem for volume %s", volumeID)
@@ -799,7 +799,7 @@ func safeUint64ToInt64(val uint64) int64 {
 // mountedEntryOrError returns the topmost mount at mountPath from the mount table.
 // Unlike findmnt, stacked mounts yield one entry (the visible one), not one line each.
 func mountedEntryOrError(ctx context.Context, mountPath string) (mount.Entry, error) {
-	entry, mounted, err := mount.MountedEntry(ctx, mountPath)
+	entry, mounted, err := lookupMountedEntry(ctx, mountPath)
 	if err != nil {
 		return mount.Entry{}, status.Errorf(codes.Internal, "Failed to read mount table for %s: %v", mountPath, err)
 	}
@@ -859,4 +859,14 @@ func resizeFilesystem(ctx context.Context, mountPath, fsType string) error {
 	default:
 		return status.Errorf(codes.Unimplemented, "Filesystem type %s is not supported for expansion", fsType)
 	}
+}
+
+// keepStatus returns err unchanged if it already carries a gRPC status (the helpers
+// choose codes such as FailedPrecondition or Unimplemented deliberately); otherwise it
+// wraps err with code and msg.
+func keepStatus(err error, code codes.Code, msg string) error {
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
+	return status.Errorf(code, "%s: %v", msg, err)
 }
