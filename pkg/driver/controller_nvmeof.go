@@ -830,7 +830,6 @@ func (s *ControllerService) deleteNVMeOFVolume(ctx context.Context, meta *Volume
 			"failed to remove NVMe-oF namespace/subsystem for volume %s (ZVOL kept so the deletion can be retried): %v",
 			meta.Name, deletionErrors)
 	}
-	s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeSubsystemID, tnsapi.PropertyNVMeNamespaceID)
 
 	// Step 2: Delete the ZVOL last. If it still has dependent clones the deletion fails with
 	// FailedPrecondition; the ZVOL keeps its properties, so a later retry finds it again.
@@ -862,6 +861,15 @@ func (s *ControllerService) deleteNVMeOFVolume(ctx context.Context, meta *Volume
 // TrueNAS will refuse to delete subsystems with active namespaces or port bindings.
 func (s *ControllerService) deleteNVMeOFSubsystem(ctx context.Context, meta *VolumeMetadata) error {
 	if meta.NVMeOFSubsystemID <= 0 {
+		return nil
+	}
+	owned, err := s.ownedNVMeOFSubsystem(ctx, meta)
+	if err != nil {
+		return presentationLookupFailed(meta, err)
+	}
+	if !owned {
+		// Gone, or the ID now belongs to another volume: nothing of ours to delete.
+		s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeSubsystemID)
 		return nil
 	}
 
@@ -933,6 +941,7 @@ func (s *ControllerService) deleteNVMeOFSubsystem(ctx context.Context, meta *Vol
 	}
 
 	klog.V(4).Infof("Deleted NVMe-oF subsystem %d", meta.NVMeOFSubsystemID)
+	s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeSubsystemID)
 	return nil
 }
 
@@ -941,12 +950,22 @@ func (s *ControllerService) deleteNVMeOFNamespace(ctx context.Context, meta *Vol
 	if meta.NVMeOFNamespaceID <= 0 {
 		return nil
 	}
+	owned, err := s.ownedNVMeOFNamespace(ctx, meta)
+	if err != nil {
+		return presentationLookupFailed(meta, err)
+	}
+	if !owned {
+		// Gone, or the ID now belongs to another volume: nothing of ours to delete.
+		s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeNamespaceID)
+		meta.NVMeOFNamespaceID = 0
+		return nil
+	}
 
 	klog.V(4).Infof("Deleting NVMe-oF namespace: ID=%d, ZVOL=%s, dataset=%s (with retry for busy resources)",
 		meta.NVMeOFNamespaceID, meta.DatasetID, meta.DatasetName)
 
 	retryConfig := retry.DeletionConfig("delete-nvmeof-namespace")
-	err := retry.WithRetryNoResult(ctx, retryConfig, func() error {
+	err = retry.WithRetryNoResult(ctx, retryConfig, func() error {
 		deleteErr := s.apiClient.DeleteNVMeOFNamespace(ctx, meta.NVMeOFNamespaceID)
 		if deleteErr != nil && tnsapi.IsNotFound(deleteErr) {
 			// Namespace already deleted - not an error (idempotency)
@@ -967,7 +986,11 @@ func (s *ControllerService) deleteNVMeOFNamespace(ctx context.Context, meta *Vol
 	klog.V(4).Infof("Deleted NVMe-oF namespace %d (ZVOL: %s)", meta.NVMeOFNamespaceID, meta.DatasetID)
 
 	// Verify namespace is gone
-	return s.verifyNamespaceDeletion(ctx, meta)
+	if err := s.verifyNamespaceDeletion(ctx, meta); err != nil {
+		return err
+	}
+	s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeNamespaceID)
+	return nil
 }
 
 // verifyNamespaceDeletion verifies that a namespace has been fully deleted.

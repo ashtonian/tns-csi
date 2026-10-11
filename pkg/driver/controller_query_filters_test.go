@@ -65,7 +65,8 @@ func TestSpecificLookupsFilterOnServer(t *testing.T) {
 		}
 		mock.DeleteNVMeOFSubsystemFunc = func(context.Context, int) error { return nil }
 		s := NewControllerService(mock, NewNodeRegistry(), "")
-		if err := s.deleteNVMeOFSubsystem(context.Background(), &VolumeMetadata{NVMeOFSubsystemID: 9}); err != nil {
+		meta := ownedMeta(mock, &VolumeMetadata{Name: "pvc-9", DatasetID: "tank/pvc-9", NVMeOFSubsystemID: 9})
+		if err := s.deleteNVMeOFSubsystem(context.Background(), meta); err != nil {
 			t.Fatal(err)
 		}
 		if want := `[["subsys_id","=",9]]`; got != want {

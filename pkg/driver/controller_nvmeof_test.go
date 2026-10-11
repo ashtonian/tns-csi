@@ -691,7 +691,7 @@ func TestDeleteNVMeOFVolume(t *testing.T) {
 			tt.mockSetup(mockClient)
 
 			controller := NewControllerService(mockClient, NewNodeRegistry(), "")
-			_, err := controller.deleteNVMeOFVolume(ctx, tt.meta)
+			_, err := controller.deleteNVMeOFVolume(ctx, ownedMeta(mockClient, tt.meta))
 
 			if tt.wantErr && err == nil {
 				t.Error("Expected error but got nil")

@@ -59,6 +59,7 @@ type MockAPIClientForSnapshots struct {
 	DeleteISCSITargetFunc          func(ctx context.Context, id int) error
 	GetDatasetPropertiesFunc       func(ctx context.Context, datasetID string, propertyNames []string) (map[string]string, error)
 	SetDatasetPropertiesFunc       func(ctx context.Context, datasetID string, properties map[string]string) error
+	DeleteISCSITargetExtentFunc    func(ctx context.Context, id int) error
 	QueryNFSSharesFunc             func(ctx context.Context, filters []interface{}) ([]tnsapi.NFSShare, error)
 	QuerySMBSharesFunc             func(ctx context.Context, filters []interface{}) ([]tnsapi.SMBShare, error)
 	QueryNVMeOFNamespacesFunc      func(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFNamespace, error)
@@ -523,7 +524,10 @@ func (m *MockAPIClientForSnapshots) CreateISCSITargetExtent(ctx context.Context,
 	}, nil
 }
 
-func (m *MockAPIClientForSnapshots) DeleteISCSITargetExtent(_ context.Context, _ int, _ bool) error {
+func (m *MockAPIClientForSnapshots) DeleteISCSITargetExtent(ctx context.Context, id int, _ bool) error {
+	if m.DeleteISCSITargetExtentFunc != nil {
+		return m.DeleteISCSITargetExtentFunc(ctx, id)
+	}
 	return nil
 }
 

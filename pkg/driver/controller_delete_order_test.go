@@ -42,9 +42,9 @@ func TestBlockVolumeDeleteKeepsZVOLWhenPresentationCleanupFails(t *testing.T) {
 			DeleteISCSIExtentFunc: func(context.Context, int) error { rec.add("DeleteISCSIExtent"); return nil },
 		}
 		s := NewControllerService(mock, NewNodeRegistry(), "")
-		_, err := s.deleteISCSIVolume(context.Background(), &VolumeMetadata{
+		_, err := s.deleteISCSIVolume(context.Background(), ownedMeta(mock, &VolumeMetadata{
 			Name: "tank/csi/pvc-i", Protocol: ProtocolISCSI, DatasetID: "tank/csi/pvc-i", ISCSITargetID: 5, ISCSIExtentID: 6,
-		})
+		}))
 		if status.Code(err) == codes.OK {
 			t.Fatal("deleteISCSIVolume() succeeded although the target could not be deleted")
 		}
@@ -64,9 +64,9 @@ func TestBlockVolumeDeleteKeepsZVOLWhenPresentationCleanupFails(t *testing.T) {
 			DeleteNVMeOFSubsystemFunc: func(context.Context, int) error { rec.add("DeleteNVMeOFSubsystem"); return cleanupFailure },
 		}
 		s := NewControllerService(mock, NewNodeRegistry(), "")
-		_, err := s.deleteNVMeOFVolume(context.Background(), &VolumeMetadata{
+		_, err := s.deleteNVMeOFVolume(context.Background(), ownedMeta(mock, &VolumeMetadata{
 			Name: "tank/csi/pvc-n", Protocol: ProtocolNVMeOF, DatasetID: "tank/csi/pvc-n", NVMeOFSubsystemID: 7, NVMeOFNamespaceID: 8,
-		})
+		}))
 		if status.Code(err) == codes.OK {
 			t.Fatal("deleteNVMeOFVolume() succeeded although the subsystem could not be deleted")
 		}
@@ -88,9 +88,9 @@ func TestBlockVolumeDeleteRemovesPresentationBeforeZVOL(t *testing.T) {
 			DeleteISCSIExtentFunc: func(context.Context, int) error { rec.add("DeleteISCSIExtent"); return nil },
 		}
 		s := NewControllerService(mock, NewNodeRegistry(), "")
-		if _, err := s.deleteISCSIVolume(context.Background(), &VolumeMetadata{
+		if _, err := s.deleteISCSIVolume(context.Background(), ownedMeta(mock, &VolumeMetadata{
 			Name: "tank/csi/pvc-i", Protocol: ProtocolISCSI, DatasetID: "tank/csi/pvc-i", ISCSITargetID: 5, ISCSIExtentID: 6,
-		}); err != nil {
+		})); err != nil {
 			t.Fatalf("deleteISCSIVolume() error = %v", err)
 		}
 		if d, tg, ex := rec.index("DeleteDataset"), rec.index("DeleteISCSITarget"), rec.index("DeleteISCSIExtent"); d < 0 || d < tg || d < ex {
@@ -109,9 +109,9 @@ func TestBlockVolumeDeleteRemovesPresentationBeforeZVOL(t *testing.T) {
 			DeleteNVMeOFSubsystemFunc: func(context.Context, int) error { rec.add("DeleteNVMeOFSubsystem"); return nil },
 		}
 		s := NewControllerService(mock, NewNodeRegistry(), "")
-		if _, err := s.deleteNVMeOFVolume(context.Background(), &VolumeMetadata{
+		if _, err := s.deleteNVMeOFVolume(context.Background(), ownedMeta(mock, &VolumeMetadata{
 			Name: "tank/csi/pvc-n", Protocol: ProtocolNVMeOF, DatasetID: "tank/csi/pvc-n", NVMeOFSubsystemID: 7, NVMeOFNamespaceID: 8,
-		}); err != nil {
+		})); err != nil {
 			t.Fatalf("deleteNVMeOFVolume() error = %v", err)
 		}
 		if d, ns, ss := rec.index("DeleteDataset"), rec.index("DeleteNVMeOFNamespace"), rec.index("DeleteNVMeOFSubsystem"); d < 0 || d < ns || d < ss {
