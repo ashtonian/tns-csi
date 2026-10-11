@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"k8s.io/klog/v2"
 )
@@ -332,7 +332,7 @@ func getISCSISessionState(ctx context.Context, devicePath string) (string, error
 	}
 
 	// Alternative: use iscsiadm to check session state
-	cmd := exec.CommandContext(ctx, "iscsiadm", "-m", "session", "-P", "1")
+	cmd := cmdexec.CommandContext(ctx, "iscsiadm", "-m", "session", "-P", "1")
 	output, cmdErr := cmd.CombinedOutput()
 	if cmdErr != nil {
 		return "", fmt.Errorf("iscsiadm failed: %w", cmdErr)

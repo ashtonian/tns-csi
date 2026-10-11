@@ -77,6 +77,19 @@ func TestCombinedOutputDoesNotHangOnInheritedPipes(t *testing.T) {
 	}
 }
 
+// CommandContext is the drop-in for exec.CommandContext used by call sites that need
+// the *exec.Cmd (custom stdio, Run). It must carry the same WaitDelay protection.
+func TestCommandContextDoesNotHangOnInheritedPipes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, _ = CommandContext(ctx, "sh", "-c", "sleep 30 & sleep 30").CombinedOutput()
+	if limit := 200*time.Millisecond + DefaultWaitDelay + 3*time.Second; time.Since(start) > limit {
+		t.Fatalf("CommandContext(...).CombinedOutput() returned after %v; want < %v", time.Since(start), limit)
+	}
+}
+
 func TestCombinedOutputMissingBinary(t *testing.T) {
 	_, err := CombinedOutput(context.Background(), time.Second, "definitely-not-a-real-binary-tns-csi")
 	if err == nil {

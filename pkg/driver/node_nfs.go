@@ -5,10 +5,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -74,7 +74,7 @@ func (s *NodeService) stageNFSVolume(ctx context.Context, req *csi.NodeStageVolu
 	klog.V(4).Infof("Executing mount command for staging: mount %v", args)
 	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
+	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to mount NFS share for staging: %v, output: %s", err, string(output))
@@ -169,7 +169,7 @@ func (s *NodeService) publishNFSVolume(ctx context.Context, req *csi.NodePublish
 	klog.V(4).Infof("Executing bind mount command: mount %v", args)
 	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
+	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to bind mount NFS volume: %v, output: %s", err, string(output))

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
@@ -204,7 +203,7 @@ func runE2FSCK(ctx context.Context, devicePath string) ([]byte, error) {
 
 	// Do not bind process lifetime to the RPC context. Killing e2fsck during a repair
 	// can leave the filesystem in a worse state; let an in-progress check finish safely.
-	cmd := exec.CommandContext(context.WithoutCancel(ctx), e2fsckPath, "-p", devicePath)
+	cmd := cmdexec.CommandContext(context.WithoutCancel(ctx), e2fsckPath, "-p", devicePath)
 	var output cappedCommandOutput
 	cmd.Stdout = &output
 	cmd.Stderr = &output

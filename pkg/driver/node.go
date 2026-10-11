@@ -3,13 +3,13 @@ package driver
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/metrics"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"github.com/fenio/tns-csi/pkg/tnsapi"
@@ -837,7 +837,7 @@ func resizeFilesystem(ctx context.Context, mountPath, fsType string) error {
 
 		klog.V(4).Infof("Resizing ext filesystem on device %s", device)
 		// #nosec G204 -- device path comes from the kernel mount table and is checked to be under /dev/
-		cmd := exec.CommandContext(ctx, "resize2fs", device)
+		cmd := cmdexec.CommandContext(ctx, "resize2fs", device)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return status.Errorf(codes.Internal, "resize2fs failed: %v, output: %s", err, string(output))
@@ -848,7 +848,7 @@ func resizeFilesystem(ctx context.Context, mountPath, fsType string) error {
 	case fsTypeXFS:
 		// For XFS, xfs_growfs operates on the mount point
 		klog.V(4).Infof("Resizing XFS filesystem at mount point %s", mountPath)
-		cmd := exec.CommandContext(ctx, "xfs_growfs", mountPath)
+		cmd := cmdexec.CommandContext(ctx, "xfs_growfs", mountPath)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return status.Errorf(codes.Internal, "xfs_growfs failed: %v, output: %s", err, string(output))

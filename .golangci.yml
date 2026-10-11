@@ -226,6 +226,9 @@ linters:
       forbid:
         - pattern: ^time\.Tick$
           msg: time.Tick leaks its ticker; use time.NewTicker and Stop it
+        - pattern: ^exec\.Command(Context)?$
+          pkg: ^os/exec$
+          msg: use cmdexec.CommandContext or cmdexec.CombinedOutput (bounded wait after timeout, timeout-aware errors)
 
   exclusions:
     generated: lax
@@ -252,6 +255,13 @@ linters:
           - revive
           - lll
           
+      # pkg/cmdexec is the one place allowed to build raw exec.Cmds; tests and the kubectl
+      # plugin (outside any CSI RPC path) may run commands directly.
+      - path: (pkg/cmdexec/|cmd/kubectl-tns-csi/|tests/|_test\.go$)
+        text: "use cmdexec"
+        linters:
+          - forbidigo
+
       # Allow fmt.Sprintf in certain cases
       - text: "printf-like formatting function"
         linters:

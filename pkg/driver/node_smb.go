@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -146,7 +146,7 @@ func (s *NodeService) stageSMBVolume(ctx context.Context, req *csi.NodeStageVolu
 	klog.Infof("Executing mount command for staging: mount %v", args)
 	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
+	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to mount SMB share for staging: %v, output: %s", err, string(output))
@@ -233,7 +233,7 @@ func (s *NodeService) publishSMBVolume(ctx context.Context, req *csi.NodePublish
 	klog.V(4).Infof("Executing bind mount command: mount %v", args)
 	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
+	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to bind mount SMB volume: %v, output: %s", err, string(output))

@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/metrics"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
@@ -179,7 +179,7 @@ func (s *NodeService) verifyDeviceHealthy(ctx context.Context, devicePath string
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		sizeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		cmd := exec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
+		cmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
 		output, err := cmd.CombinedOutput()
 		cancel()
 
@@ -613,7 +613,7 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
+	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to mount device: %v, output: %s", err, string(output))

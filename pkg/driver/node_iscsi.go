@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -56,12 +57,12 @@ func iscsiadmCmd(ctx context.Context, args ...string) *exec.Cmd {
 		nsenterArgs = append(nsenterArgs, "--mount=/proc/1/ns/mnt", "--ipc=/proc/1/ns/ipc", "--", "iscsiadm")
 		nsenterArgs = append(nsenterArgs, args...)
 		klog.V(5).Infof("Running iscsiadm via nsenter: nsenter %v", nsenterArgs)
-		return exec.CommandContext(ctx, "nsenter", nsenterArgs...)
+		return cmdexec.CommandContext(ctx, "nsenter", nsenterArgs...)
 	}
 
 	// Not in container or no access to host namespaces - run directly
 	klog.V(5).Infof("Running iscsiadm directly: iscsiadm %v", args)
-	return exec.CommandContext(ctx, "iscsiadm", args...)
+	return cmdexec.CommandContext(ctx, "iscsiadm", args...)
 }
 
 func (s *NodeService) runISCSIAdm(ctx context.Context, args ...string) ([]byte, error) {
@@ -593,7 +594,7 @@ func (s *NodeService) formatAndMountISCSIDevice(ctx context.Context, volumeID, d
 	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
+	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to mount device: %v, output: %s", err, string(output))

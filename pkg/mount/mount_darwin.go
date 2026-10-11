@@ -9,11 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
+
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 )
 
 var errSourceMountUnsupported = errors.New("source mount checks are unsupported on macOS")
@@ -35,7 +36,7 @@ func IsMounted(ctx context.Context, targetPath string) (bool, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(checkCtx, "mount")
+	cmd := cmdexec.CommandContext(checkCtx, "mount")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.V(4).Infof("Failed to run mount command: %v", err)
@@ -85,7 +86,7 @@ func Unmount(ctx context.Context, targetPath string) error {
 	umountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(umountCtx, "umount", targetPath)
+	cmd := cmdexec.CommandContext(umountCtx, "umount", targetPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// On macOS for testing, log the error but don't fail if unmount fails

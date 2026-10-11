@@ -27,9 +27,7 @@ func CombinedOutput(ctx context.Context, timeout time.Duration, name string, arg
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = DefaultWaitDelay
-	out, err := cmd.CombinedOutput()
+	out, err := CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return out, fmt.Errorf("%s: %w (%w)", name, ctxErr, err)
@@ -37,6 +35,16 @@ func CombinedOutput(ctx context.Context, timeout time.Duration, name string, arg
 		return out, fmt.Errorf("%s: %w", name, err)
 	}
 	return out, nil
+}
+
+// CommandContext is the drop-in replacement for exec.CommandContext for call sites that
+// need the *exec.Cmd itself (custom stdio, Run). It sets WaitDelay so that once ctx is
+// done, waiting on the command returns within DefaultWaitDelay even if a child process
+// still holds its output pipes. All driver code must use this or CombinedOutput.
+func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = DefaultWaitDelay
+	return cmd
 }
 
 // IsTimeout reports whether err came from a command killed for exceeding its deadline.
