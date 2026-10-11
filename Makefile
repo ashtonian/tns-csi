@@ -127,7 +127,7 @@ mod-tidy-check:
 	@$(GOMOD) tidy -diff || (echo "go.mod/go.sum not tidy: run 'go mod tidy'" && exit 1)
 
 # Known-vulnerability scan of reachable code (needs network for the vuln DB; not part of check).
-GOVULNCHECK_VERSION ?= v1.8.0
+GOVULNCHECK_VERSION ?= v1.9.0
 vulncheck:
 	@echo "Running govulncheck $(GOVULNCHECK_VERSION)..."
 	$(GOCMD) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
@@ -150,14 +150,17 @@ test-coverage: coverage
 # Coverage ratchet: enforce the floors in .testcoverage.yml.
 # COVERAGE_BREAKDOWN=<file>       also write a breakdown (CI uploads it from main).
 # COVERAGE_BASE_BREAKDOWN=<file>  also fail if total coverage drops below that breakdown.
-GO_TEST_COVERAGE_VERSION ?= v2.19.0
+GO_TEST_COVERAGE_VERSION ?= v2.20.0
+# go-test-coverage v2.20+ needs Go 1.27; only the tool runs on this toolchain (fetched on
+# demand), the tests that produce coverage.out still use the repo's Go version.
+GO_TEST_COVERAGE_TOOLCHAIN ?= go1.27.2
 COVERAGE_BREAKDOWN ?=
 COVERAGE_BASE_BREAKDOWN ?=
 # Allowed drop in total coverage vs the base, in percentage points. A small tolerance absorbs
 # run-to-run noise from timing-dependent paths; floors still catch real erosion.
 COVERAGE_DIFF_THRESHOLD ?= -0.5
 coverage-check: coverage
-	$(GOCMD) run github.com/vladopajic/go-test-coverage/v2@$(GO_TEST_COVERAGE_VERSION) --config=.testcoverage.yml \
+	GOTOOLCHAIN=$(GO_TEST_COVERAGE_TOOLCHAIN) $(GOCMD) run github.com/vladopajic/go-test-coverage/v2@$(GO_TEST_COVERAGE_VERSION) --config=.testcoverage.yml \
 		$(if $(COVERAGE_BREAKDOWN),--breakdown-file-name=$(COVERAGE_BREAKDOWN)) \
 		$(if $(COVERAGE_BASE_BREAKDOWN),--diff-base-breakdown-file-name=$(COVERAGE_BASE_BREAKDOWN) --diff-threshold=$(COVERAGE_DIFF_THRESHOLD))
 
