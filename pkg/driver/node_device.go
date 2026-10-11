@@ -84,10 +84,7 @@ func (s *NodeService) publishBlockVolume(ctx context.Context, stagingTargetPath,
 	args := []string{"-o", mount.JoinMountOptions(mountOptions), stagingTargetPath, targetPath}
 
 	klog.V(4).Infof("Executing bind mount command: mount %v", args)
-	mountCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runMount(ctx, 15*time.Second, args...)
 	if err != nil {
 		// Cleanup: remove target file on failure
 		if removeErr := os.Remove(targetPath); removeErr != nil && !os.IsNotExist(removeErr) {
@@ -140,10 +137,7 @@ func (s *NodeService) publishFilesystemVolume(ctx context.Context, stagingTarget
 	args := []string{"-o", mount.JoinMountOptions(mountOptions), stagingTargetPath, targetPath}
 
 	klog.V(4).Infof("Executing bind mount command: mount %v", args)
-	mountCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	cmd := cmdexec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runMount(ctx, 15*time.Second, args...)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to bind mount filesystem: %v, output: %s", err, string(output))
 	}
