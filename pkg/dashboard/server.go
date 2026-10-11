@@ -38,7 +38,7 @@ func NewServer(client tnsapi.ClientInterface, pool, version, clusterID string) (
 	}
 
 	return &Server{
-		client:    client,
+		client:    newCachedClient(client, dashboardCacheTTL),
 		templates: tmpl,
 		pool:      pool,
 		version:   version,

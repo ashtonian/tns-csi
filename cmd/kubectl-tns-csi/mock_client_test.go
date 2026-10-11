@@ -44,6 +44,7 @@ type mockClient struct {
 	QueryNFSShareFunc     func(ctx context.Context, path string) ([]tnsapi.NFSShare, error)
 	QueryNFSShareByIDFunc func(ctx context.Context, shareID int) (*tnsapi.NFSShare, error)
 	QueryAllNFSSharesFunc func(ctx context.Context, pathPrefix string) ([]tnsapi.NFSShare, error)
+	QueryNVMeOFSubsystemsFunc func(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFSubsystem, error)
 
 	// ZVOL operations
 	CreateZvolFunc func(ctx context.Context, params tnsapi.ZvolCreateParams) (*tnsapi.Dataset, error)
@@ -625,6 +626,9 @@ func (m *mockClient) QueryNVMeOFNamespaces(ctx context.Context, _ []interface{})
 	return m.QueryAllNVMeOFNamespaces(ctx)
 }
 
-func (m *mockClient) QueryNVMeOFSubsystems(ctx context.Context, _ []interface{}) ([]tnsapi.NVMeOFSubsystem, error) {
+func (m *mockClient) QueryNVMeOFSubsystems(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFSubsystem, error) {
+	if m.QueryNVMeOFSubsystemsFunc != nil {
+		return m.QueryNVMeOFSubsystemsFunc(ctx, filters)
+	}
 	return m.ListAllNVMeOFSubsystems(ctx)
 }

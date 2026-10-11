@@ -291,7 +291,7 @@ func handleISCSIImport(ctx context.Context, client tnsapi.ClientInterface, datas
 	zvolPath := "zvol/" + dataset.ID
 
 	// Find existing extent for this zvol
-	extents, err := client.QueryISCSIExtents(ctx, nil)
+	extents, err := client.QueryISCSIExtents(ctx, []interface{}{[]interface{}{"disk", "=", zvolPath}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query iSCSI extents: %w", err)
 	}
@@ -391,7 +391,7 @@ func handleNFSImport(ctx context.Context, client tnsapi.ClientInterface, dataset
 	props := make(map[string]string)
 
 	// Check for existing NFS share
-	shares, err := client.QueryAllNFSShares(ctx, "")
+	shares, err := client.QueryNFSShare(ctx, dataset.Mountpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query NFS shares: %w", err)
 	}

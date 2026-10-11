@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -86,8 +87,18 @@ func findAttachedSnapshots(ctx context.Context, client tnsapi.ClientInterface, c
 		}
 	}
 
-	// Query all snapshots in a single API call instead of per-dataset
-	allSnaps, err := client.QuerySnapshots(ctx, []interface{}{})
+	if len(managedDatasets) == 0 {
+		return nil, nil
+	}
+
+	// One API call for the snapshots of the managed datasets only. An empty filter would
+	// return every snapshot on the system, including periodic snapshots unrelated to CSI.
+	datasetIDs := make([]string, 0, len(managedDatasets))
+	for id := range managedDatasets {
+		datasetIDs = append(datasetIDs, id)
+	}
+	sort.Strings(datasetIDs)
+	allSnaps, err := client.QuerySnapshots(ctx, []interface{}{[]interface{}{"dataset", "in", datasetIDs}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query snapshots: %w", err)
 	}
@@ -152,7 +163,12 @@ func FindUnmanagedVolumes(ctx context.Context, client tnsapi.ClientInterface, se
 		managedIDs[managedDatasets[i].ID] = true
 	}
 
-	nfsShares, err := client.QueryAllNFSShares(ctx, "")
+	// Only shares that can belong to datasets under searchPath are relevant.
+	var shareFilters []interface{}
+	if searchPath != "" {
+		shareFilters = []interface{}{[]interface{}{"path", "^", "/mnt/" + searchPath + "/"}}
+	}
+	nfsShares, err := client.QueryNFSShares(ctx, shareFilters)
 	if err != nil {
 		nfsShares = nil
 	}
@@ -239,7 +255,8 @@ func GetVolumeDetails(ctx context.Context, client tnsapi.ClientInterface, volume
 	if err == nil && ds != nil {
 		dataset = ds
 	} else {
-		datasets, findErr := client.FindDatasetsByProperty(ctx, "", tnsapi.PropertyManagedBy, tnsapi.ManagedByValue)
+		// volumeRef may be a dataset ID: scope the lookup to that subtree, then match exactly.
+		datasets, findErr := client.FindDatasetsByProperty(ctx, volumeRef, tnsapi.PropertyManagedBy, tnsapi.ManagedByValue)
 		if findErr != nil {
 			return nil, fmt.Errorf("failed to query datasets: %w", findErr)
 		}
