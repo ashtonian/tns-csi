@@ -464,6 +464,14 @@ func (s *ControllerService) getOrCreateDataset(ctx context.Context, params *nfsV
 	}
 
 	// Create new dataset
+	// Ownership metadata goes in the create call itself, so the dataset can never exist
+	// without it (a later non-fatal property write could fail and leak the volume).
+	protocol := tnsapi.ProtocolNFS
+	if params.shareType == "SMB" {
+		protocol = tnsapi.ProtocolSMB
+	}
+	createParams.UserProperties = tnsapi.UserPropertyList(tnsapi.OwnershipPropertiesV1(
+		params.volumeName, protocol, params.deleteStrategy, s.clusterID, params.requestedCapacity))
 	dataset, err := s.apiClient.CreateDataset(ctx, createParams)
 	if err != nil {
 		timer.ObserveError()

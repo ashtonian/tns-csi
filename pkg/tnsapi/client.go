@@ -1245,6 +1245,10 @@ type DatasetCreateParams struct {
 	Name string `json:"name"`
 	Type string `json:"type"` // FILESYSTEM, VOLUME
 
+	// UserProperties are ZFS user properties set atomically by pool.dataset.create
+	// (TrueNAS 25.10+), so a dataset never exists without its ownership metadata.
+	UserProperties []UserPropertyKV `json:"user_properties,omitempty"`
+
 	// ShareType tells TrueNAS to optimize the dataset for a specific sharing protocol.
 	// "SMB" configures NFSv4 ACLs (acltype=nfsv4, aclmode=restricted) automatically.
 	// "GENERIC" is the default (POSIX ACLs). Used by NFS and other protocols.
@@ -1710,6 +1714,9 @@ func (c *Client) SetFilesystemACL(ctx context.Context, path string) error {
 //
 //nolint:govet // fieldalignment: struct layout prioritizes readability over memory optimization
 type ZvolCreateParams struct {
+	// UserProperties: see DatasetCreateParams.UserProperties.
+	UserProperties []UserPropertyKV `json:"user_properties,omitempty"`
+
 	Name         string `json:"name"`
 	Type         string `json:"type"`
 	Volblocksize string `json:"volblocksize,omitempty"`

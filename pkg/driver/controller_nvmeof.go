@@ -676,6 +676,10 @@ func (s *ControllerService) getOrCreateZVOL(ctx context.Context, params *nvmeofV
 	}
 
 	// Create new ZVOL
+	// Ownership metadata goes in the create call itself, so the dataset can never exist
+	// without it (a later non-fatal property write could fail and leak the volume).
+	createParams.UserProperties = tnsapi.UserPropertyList(tnsapi.OwnershipPropertiesV1(
+		params.volumeName, tnsapi.ProtocolNVMeOF, params.deleteStrategy, s.clusterID, params.requestedCapacity))
 	zvol, err := s.apiClient.CreateZvol(ctx, createParams)
 	if err != nil {
 		timer.ObserveError()
