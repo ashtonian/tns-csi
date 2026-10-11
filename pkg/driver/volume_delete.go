@@ -65,7 +65,7 @@ func (s *ControllerService) readVolumeOwnership(ctx context.Context, meta *Volum
 
 	props, err := s.apiClient.GetDatasetProperties(ctx, meta.DatasetID, names)
 	if err != nil {
-		if isNotFoundError(err) {
+		if tnsapi.IsNotFound(err) {
 			return volumeOwnership{deleteStrategy: tnsapi.DeleteStrategyDelete, notFound: true}, nil
 		}
 		return volumeOwnership{}, status.Errorf(codes.Unavailable,
