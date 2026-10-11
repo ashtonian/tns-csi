@@ -18,8 +18,8 @@ type fakeClient struct {
 	snapshots      func(filters []interface{}) ([]tnsapi.Snapshot, error)
 	nfsShares      func(filters []interface{}) ([]tnsapi.NFSShare, error)
 	datasets       []tnsapi.DatasetWithProperties
-	findCalls      atomic.Int32
 	findDelay      time.Duration
+	findCalls      atomic.Int32
 	queriedTargets atomic.Int32
 }
 
@@ -164,8 +164,8 @@ func TestCachedClientDedupesPropertyLookups(t *testing.T) {
 		t.Fatalf("a different property must not share the cache entry (lookups = %d, want 2)", n)
 	}
 
-	expired := newCachedClient(&fakeClient{}, time.Nanosecond)
-	under := expired.ClientInterface.(*fakeClient)
+	under := &fakeClient{}
+	expired := newCachedClient(under, time.Nanosecond)
 	for range 2 {
 		if _, err := expired.FindDatasetsByProperty(context.Background(), "", "p", "v"); err != nil {
 			t.Fatal(err)

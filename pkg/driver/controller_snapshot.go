@@ -563,7 +563,7 @@ func (s *ControllerService) discoverVolumeBySearching(ctx context.Context, volum
 	// iSCSI extents whose path ends in the volume name ("$" is TrueNAS's ends-with filter).
 	// The client-side checks below stay as the authoritative match.
 	pathSuffix := "/" + volumeID
-	shares, err := s.apiClient.QueryNFSShares(ctx, []interface{}{[]interface{}{"path", "$", pathSuffix}})
+	shares, err := s.apiClient.QueryNFSShares(ctx, []interface{}{[]interface{}{queryFieldPath, "$", pathSuffix}})
 	if err == nil && len(shares) > 0 {
 		for _, share := range shares {
 			if strings.HasSuffix(share.Path, "/"+volumeID) {
@@ -576,7 +576,7 @@ func (s *ControllerService) discoverVolumeBySearching(ctx context.Context, volum
 		}
 	}
 
-	smbShares, err := s.apiClient.QuerySMBShares(ctx, []interface{}{[]interface{}{"path", "$", pathSuffix}})
+	smbShares, err := s.apiClient.QuerySMBShares(ctx, []interface{}{[]interface{}{queryFieldPath, "$", pathSuffix}})
 	if err == nil && len(smbShares) > 0 {
 		for _, share := range smbShares {
 			if strings.HasSuffix(share.Path, "/"+volumeID) {
@@ -602,7 +602,7 @@ func (s *ControllerService) discoverVolumeBySearching(ctx context.Context, volum
 		}
 	}
 
-	extents, err := s.apiClient.QueryISCSIExtents(ctx, []interface{}{[]interface{}{"disk", "$", pathSuffix}})
+	extents, err := s.apiClient.QueryISCSIExtents(ctx, []interface{}{[]interface{}{queryFieldDisk, "$", pathSuffix}})
 	if err == nil {
 		for _, extent := range extents {
 			if strings.Contains(extent.Disk, volumeID) {

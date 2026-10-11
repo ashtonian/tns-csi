@@ -22,6 +22,9 @@ var (
 	errNoISCSITarget  = errors.New("no iSCSI target found")
 )
 
+// snapshotFieldDataset is the pool.snapshot.query field naming a snapshot's dataset.
+const snapshotFieldDataset = "dataset"
+
 // FindManagedVolumes finds all datasets managed by tns-csi.
 // If clusterID is non-empty, only returns volumes that either match the clusterID
 // or have no cluster_id property (legacy volumes).
@@ -98,7 +101,7 @@ func findAttachedSnapshots(ctx context.Context, client tnsapi.ClientInterface, c
 		datasetIDs = append(datasetIDs, id)
 	}
 	sort.Strings(datasetIDs)
-	allSnaps, err := client.QuerySnapshots(ctx, []interface{}{[]interface{}{"dataset", "in", datasetIDs}})
+	allSnaps, err := client.QuerySnapshots(ctx, []interface{}{[]interface{}{snapshotFieldDataset, "in", datasetIDs}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query snapshots: %w", err)
 	}

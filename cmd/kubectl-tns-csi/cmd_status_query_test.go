@@ -34,7 +34,8 @@ func TestVolumeStatusLooksUpByID(t *testing.T) {
 	})
 
 	t.Run("nfs share missing", func(t *testing.T) {
-		m := &mockClient{QueryNFSShareByIDFunc: func(context.Context, int) (*tnsapi.NFSShare, error) { return nil, nil }}
+		var missing *tnsapi.NFSShare // the client's "not found"
+		m := &mockClient{QueryNFSShareByIDFunc: func(context.Context, int) (*tnsapi.NFSShare, error) { return missing, nil }}
 		props := map[string]tnsapi.UserProperty{tnsapi.PropertyNFSShareID: {Value: "5"}}
 		if err := checkNFSStatus(context.Background(), m, nil, props, &VolumeStatus{}); err == nil {
 			t.Fatal("missing share reported healthy")

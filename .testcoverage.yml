@@ -19,7 +19,7 @@ profile: coverage.out
 threshold:
   # Per-file floors are not enforced yet (many small files are untested).
   file: 0
-  # Packages not listed under override (pkg/dashboard, cmd/tns-csi-driver) have no floor yet.
+  # Packages not listed under override (cmd/tns-csi-driver) have no floor yet.
   package: 0
   total: 30
 
@@ -37,6 +37,9 @@ override:
     threshold: 57
   - path: ^cmd/kubectl-tns-csi$
     threshold: 2
+  # 10.0% once its query tests landed.
+  - path: ^pkg/dashboard$
+    threshold: 9
 
 exclude:
   paths:

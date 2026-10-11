@@ -1849,20 +1849,23 @@ func (m *MockClient) Close() {
 // Verify that MockClient implements ClientInterface at compile time.
 var _ tnsapi.ClientInterface = (*MockClient)(nil)
 
-// Filtered queries ignore the filters and return everything; callers re-check matches
+// QueryNFSShares ignores the filters and returns every share; callers re-check matches
 // client-side, so the unfiltered superset is still a correct answer.
 func (m *MockClient) QueryNFSShares(ctx context.Context, _ []interface{}) ([]tnsapi.NFSShare, error) {
 	return m.QueryAllNFSShares(ctx, "")
 }
 
+// QuerySMBShares ignores the filters (see QueryNFSShares).
 func (m *MockClient) QuerySMBShares(ctx context.Context, _ []interface{}) ([]tnsapi.SMBShare, error) {
 	return m.QueryAllSMBShares(ctx, "")
 }
 
+// QueryNVMeOFNamespaces ignores the filters (see QueryNFSShares).
 func (m *MockClient) QueryNVMeOFNamespaces(ctx context.Context, _ []interface{}) ([]tnsapi.NVMeOFNamespace, error) {
 	return m.QueryAllNVMeOFNamespaces(ctx)
 }
 
+// QueryNVMeOFSubsystems ignores the filters (see QueryNFSShares).
 func (m *MockClient) QueryNVMeOFSubsystems(ctx context.Context, _ []interface{}) ([]tnsapi.NVMeOFSubsystem, error) {
 	return m.ListAllNVMeOFSubsystems(ctx)
 }

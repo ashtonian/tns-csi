@@ -46,7 +46,7 @@ func TestImportLooksUpExactShareAndExtent(t *testing.T) {
 			},
 		}
 		ds := &tnsapi.Dataset{ID: "tank/legacy-zvol", Type: "VOLUME"}
-		_, _ = handleISCSIImport(context.Background(), m, ds, true) //nolint:errcheck // only the query is under test
+		_, _ = handleISCSIImport(context.Background(), m, ds, true) // only the query is under test
 		if want := `[["disk","=","zvol/tank/legacy-zvol"]]`; got != want {
 			t.Fatalf("extent filters = %s, want %s", got, want)
 		}

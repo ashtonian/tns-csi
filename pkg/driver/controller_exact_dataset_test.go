@@ -12,6 +12,7 @@ import (
 // snapshot ever taken. Exact lookups must use an exact ID query.
 func TestExactDatasetLookupsDoNotListSubtrees(t *testing.T) {
 	newMock := func(t *testing.T) (*MockAPIClientForSnapshots, *[]string) {
+		t.Helper()
 		var asked []string
 		return &MockAPIClientForSnapshots{
 			QueryAllDatasetsFunc: func(_ context.Context, prefix string) ([]tnsapi.Dataset, error) {

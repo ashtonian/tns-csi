@@ -6,6 +6,12 @@ import (
 	"github.com/fenio/tns-csi/pkg/tnsapi"
 )
 
+// TrueNAS query-filter field names used by the driver's specific lookups.
+const (
+	queryFieldPath = "path" // sharing.nfs.query / sharing.smb.query share path
+	queryFieldDisk = "disk" // iscsi.extent.query backing device ("zvol/<dataset>")
+)
+
 // queryExactDataset looks up one dataset by exact ID and returns it as a one-element
 // slice, or an empty slice when it does not exist. It used to filter an "id starts with"
 // listing, which returned the dataset's whole subtree. The ID is still re-checked so

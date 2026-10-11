@@ -39,11 +39,11 @@ type mockClient struct {
 	FindDatasetByCSIVolumeNameFunc func(ctx context.Context, prefix, csiVolumeName string) (*tnsapi.DatasetWithProperties, error)
 
 	// NFS share operations
-	CreateNFSShareFunc    func(ctx context.Context, params tnsapi.NFSShareCreateParams) (*tnsapi.NFSShare, error)
-	DeleteNFSShareFunc    func(ctx context.Context, shareID int) error
-	QueryNFSShareFunc     func(ctx context.Context, path string) ([]tnsapi.NFSShare, error)
-	QueryNFSShareByIDFunc func(ctx context.Context, shareID int) (*tnsapi.NFSShare, error)
-	QueryAllNFSSharesFunc func(ctx context.Context, pathPrefix string) ([]tnsapi.NFSShare, error)
+	CreateNFSShareFunc        func(ctx context.Context, params tnsapi.NFSShareCreateParams) (*tnsapi.NFSShare, error)
+	DeleteNFSShareFunc        func(ctx context.Context, shareID int) error
+	QueryNFSShareFunc         func(ctx context.Context, path string) ([]tnsapi.NFSShare, error)
+	QueryNFSShareByIDFunc     func(ctx context.Context, shareID int) (*tnsapi.NFSShare, error)
+	QueryAllNFSSharesFunc     func(ctx context.Context, pathPrefix string) ([]tnsapi.NFSShare, error)
 	QueryNVMeOFSubsystemsFunc func(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFSubsystem, error)
 
 	// ZVOL operations

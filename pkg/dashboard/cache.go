@@ -60,8 +60,10 @@ func (c *cachedClient) FindDatasetsByProperty(ctx context.Context, prefix, prope
 	if err != nil {
 		return nil, err
 	}
-	datasets, _ := v.([]tnsapi.DatasetWithProperties) //nolint:errcheck // the closure only returns this type
-	return append([]tnsapi.DatasetWithProperties(nil), datasets...), nil
+	if datasets, ok := v.([]tnsapi.DatasetWithProperties); ok {
+		return append([]tnsapi.DatasetWithProperties(nil), datasets...), nil
+	}
+	return nil, nil
 }
 
 // FindManagedDatasets goes through the cache too (the embedded client's version would
