@@ -298,4 +298,3 @@ func (s *NodeService) rescanNVMeNamespace(ctx context.Context, devicePath string
 	klog.V(4).Infof("Successfully rescanned NVMe namespace on controller %s", controllerPath)
 	return nil
 }
-

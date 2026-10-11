@@ -130,11 +130,11 @@ func nvmeControllerForNamespace(sysBlock, devicePath string) (controller, state 
 
 	ownerName := filepath.Base(owner)
 	if nvmeControllerDirName.MatchString(ownerName) {
-		state, err := readSysfsValue(filepath.Join(owner, "state"))
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read state of %s: %w", ownerName, err)
+		ctrlState, readErr := readSysfsValue(filepath.Join(owner, "state"))
+		if readErr != nil {
+			return "", "", fmt.Errorf("failed to read state of %s: %w", ownerName, readErr)
 		}
-		return "/dev/" + ownerName, state, nil
+		return "/dev/" + ownerName, ctrlState, nil
 	}
 
 	entries, err := os.ReadDir(owner)
