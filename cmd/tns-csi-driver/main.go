@@ -2,11 +2,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/fenio/tns-csi/pkg/driver"
 	"github.com/fenio/tns-csi/pkg/metrics"
@@ -112,7 +115,23 @@ func main() {
 		klog.Fatalf("Failed to create driver: %v", err)
 	}
 
-	if err := drv.Run(); err != nil {
-		klog.Fatalf("Failed to run driver: %v", err)
+	// Run until the server fails or the pod is asked to stop. On SIGTERM (pod deletion,
+	// rolling update) stop accepting RPCs and let in-flight ones finish, bounded, instead
+	// of exiting mid-operation.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- drv.Run() }()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			klog.Fatalf("Failed to run driver: %v", err)
+		}
+	case <-ctx.Done():
+		klog.Info("Received termination signal, shutting down")
+		drv.Stop()
+		<-runErr
 	}
 }
