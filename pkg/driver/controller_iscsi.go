@@ -886,6 +886,7 @@ func (s *ControllerService) deleteISCSIVolume(ctx context.Context, meta *VolumeM
 		return nil, status.Errorf(codes.Unavailable,
 			"failed to remove iSCSI target/extent for volume %s (ZVOL kept so the deletion can be retried): %v", meta.Name, err)
 	}
+	s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyISCSITargetID, tnsapi.PropertyISCSIExtentID)
 
 	// Step 2: Delete the ZVOL last. If it still has dependent clones the deletion fails with
 	// FailedPrecondition; the ZVOL keeps its properties, so a later retry finds it again.

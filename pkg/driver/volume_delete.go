@@ -105,3 +105,21 @@ func presentationPropertiesRecorded(props map[string]string, keys []string) bool
 	}
 	return true
 }
+
+// forgetPresentationIDs zeroes the given ID properties on a ZVOL whose presentation objects
+// (target/extent, namespace/subsystem) were just deleted. If the ZVOL delete that follows
+// fails, for example on dependent clones, retries would otherwise keep deleting by those
+// IDs, which TrueNAS may by then have handed to another volume. Failure is only logged:
+// the common case deletes the ZVOL immediately afterwards.
+func (s *ControllerService) forgetPresentationIDs(ctx context.Context, datasetID string, keys ...string) {
+	if datasetID == "" {
+		return
+	}
+	props := make(map[string]string, len(keys))
+	for _, k := range keys {
+		props[k] = "0"
+	}
+	if err := s.apiClient.SetDatasetProperties(ctx, datasetID, props); err != nil && !tnsapi.IsNotFound(err) {
+		klog.Warningf("Failed to clear presentation IDs on %s after deleting them: %v", datasetID, err)
+	}
+}

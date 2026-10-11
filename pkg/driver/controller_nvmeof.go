@@ -830,6 +830,7 @@ func (s *ControllerService) deleteNVMeOFVolume(ctx context.Context, meta *Volume
 			"failed to remove NVMe-oF namespace/subsystem for volume %s (ZVOL kept so the deletion can be retried): %v",
 			meta.Name, deletionErrors)
 	}
+	s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeSubsystemID, tnsapi.PropertyNVMeNamespaceID)
 
 	// Step 2: Delete the ZVOL last. If it still has dependent clones the deletion fails with
 	// FailedPrecondition; the ZVOL keeps its properties, so a later retry finds it again.
