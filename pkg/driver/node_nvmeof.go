@@ -463,21 +463,11 @@ func (s *NodeService) deriveNQNFromStagingPath(ctx context.Context, stagingTarge
 		return "", err
 	}
 
-	controllerName, err := getNVMeControllerFromDevicePath(devicePath)
+	// The device's own owner (controller or multipath subsystem) carries its NQN; a
+	// controller name derived from the device name is wrong under native multipath.
+	nqn, err := nvmeNQNForDevice(sysBlockPath, devicePath)
 	if err != nil {
 		return "", err
-	}
-
-	nqnPath := "/sys/class/nvme/" + controllerName + "/subsysnqn"
-	//nolint:gosec // sysfs read from fixed kernel path
-	data, err := os.ReadFile(nqnPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read NQN from %s: %w", nqnPath, err)
-	}
-
-	nqn := strings.TrimSpace(string(data))
-	if nqn == "" {
-		return "", fmt.Errorf("%s: %w", nqnPath, ErrNVMeEmptyNQN)
 	}
 	return nqn, nil
 }
@@ -540,22 +530,6 @@ func (s *NodeService) getStagedNVMeDevicePath(ctx context.Context, stagingTarget
 		return "", fmt.Errorf("staging path %s resolved to %s: %w", stagingTargetPath, resolved, ErrNVMeNonNVMeStagingDevice)
 	}
 	return resolved, nil
-}
-
-// getNVMeControllerFromDevicePath extracts controller name (e.g. nvme0) from device path.
-func getNVMeControllerFromDevicePath(devicePath string) (string, error) {
-	base := filepath.Base(devicePath)
-	if !strings.HasPrefix(base, "nvme") {
-		return "", fmt.Errorf("%s: %w", devicePath, ErrNVMeNotNVMeDevice)
-	}
-
-	// Namespace node: nvme0n1 -> nvme0
-	if idx := strings.Index(base[4:], "n"); idx >= 0 {
-		return base[:4+idx], nil
-	}
-
-	// Controller node: nvme0
-	return base, nil
 }
 
 // formatAndMountNVMeDevice formats (if needed) and mounts an NVMe device.

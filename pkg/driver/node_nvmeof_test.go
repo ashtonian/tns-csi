@@ -13,7 +13,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// useFakeSysBlock points namespace-device resolution at a fake /sys/block for one test.
+func useFakeSysBlock(t *testing.T, owners, devs map[string]string) {
+	t.Helper()
+	orig := sysBlockPath
+	sysBlockPath = fakeSysBlock(t, owners, devs, nil)
+	t.Cleanup(func() { sysBlockPath = orig })
+}
+
 func TestParseNVMeListSubsysOutputUsesExactNQN(t *testing.T) {
+	useFakeSysBlock(t,
+		map[string]string{"nvme4": "nqn.2026-02.csi.tns:volume-longer", "nvme7": "nqn.2026-02.csi.tns:volume"},
+		map[string]string{"nvme4n1": "nvme4", "nvme7n1": "nvme7"})
 	service := NewNodeService("test-node", nil, true, nil, false, 5)
 	output := []byte(`{
   "Subsystems": [
@@ -38,6 +49,7 @@ func TestParseNVMeListSubsysOutputUsesExactNQN(t *testing.T) {
 }
 
 func TestParseNVMeListSubsysOutputSupportsNQNField(t *testing.T) {
+	useFakeSysBlock(t, map[string]string{"nvme2": "nqn.2026-02.csi.tns:volume"}, map[string]string{"nvme2n1": "nvme2"})
 	service := NewNodeService("test-node", nil, true, nil, false, 5)
 	output := []byte(`{
   "Subsystems": [{
@@ -52,6 +64,7 @@ func TestParseNVMeListSubsysOutputSupportsNQNField(t *testing.T) {
 }
 
 func TestParseNVMeListSubsysOutputSupportsHostArray(t *testing.T) {
+	useFakeSysBlock(t, map[string]string{"nvme-subsys4": "nqn.2026-02.csi.tns:volume"}, map[string]string{"nvme4n1": "nvme-subsys4"})
 	service := NewNodeService("test-node", nil, true, nil, false, 5)
 	output := []byte(`[
   {

@@ -224,15 +224,15 @@ func (s *NodeService) parseNVMeListSubsysOutputForNQN(output []byte, nqn string)
 	if err != nil || subsystem == nil {
 		return ""
 	}
-	for _, path := range subsystem.Paths {
-		if isNVMeControllerName(path.Name) {
-			devicePath := fmt.Sprintf("/dev/%sn1", path.Name)
-			klog.V(4).Infof("Found NVMe device from list-subsys: %s (controller: %s, NQN: %s)",
-				devicePath, path.Name, nqn)
-			return devicePath
-		}
+	// The subsystem is connected; resolve its namespace device from sysfs rather than
+	// assuming /dev/<controller>n1, which is wrong under native NVMe multipath.
+	devicePath, err := nvmeNamespaceDeviceForNQN(sysBlockPath, nqn)
+	if err != nil {
+		klog.V(4).Infof("Subsystem %s is listed but its namespace device is not resolvable yet: %v", nqn, err)
+		return ""
 	}
-	return ""
+	klog.V(4).Infof("Found NVMe device from list-subsys + sysfs: %s (NQN: %s)", devicePath, nqn)
+	return devicePath
 }
 
 // findNVMeDeviceByNQNFromSys finds NVMe device by checking /sys/class/nvme.
@@ -276,10 +276,11 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 			deviceName, deviceNQN, nqn, deviceNQN == nqn)
 
 		if deviceNQN == nqn {
-			// Found the device, construct path with NSID=1 (independent subsystems)
-			devicePath := fmt.Sprintf("/dev/%sn1", deviceName)
+			// Found the controller. Resolve the namespace device by its own subsysnqn, not
+			// as /dev/<controller>n1 (wrong under native NVMe multipath).
+			devicePath := nvmeNamespaceDeviceOrEmpty(nqn)
 			// Check if device exists AND is healthy (non-zero size block device)
-			if _, err := os.Stat(devicePath); err == nil {
+			if _, err := os.Stat(devicePath); devicePath != "" && err == nil {
 				if s.isDeviceHealthy(ctx, devicePath) {
 					klog.V(4).Infof("Found healthy NVMe device from sysfs: %s (controller: %s, NQN: %s)",
 						devicePath, deviceName, nqn)
@@ -292,6 +293,10 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 			klog.V(4).Infof("Found matching NQN on %s but device path %s not ready, trying ns-rescan", deviceName, devicePath)
 			s.forceNamespaceRescan(ctx, controllerPath)
 			// Check again after rescan - device must exist AND be healthy
+			devicePath = nvmeNamespaceDeviceOrEmpty(nqn)
+			if devicePath == "" {
+				return "", fmt.Errorf("%w for NQN %s after ns-rescan (controller: %s)", ErrNVMeDeviceNotFound, nqn, deviceName)
+			}
 			if _, err := os.Stat(devicePath); err == nil && s.isDeviceHealthy(ctx, devicePath) {
 				klog.V(4).Infof("Found healthy NVMe device after ns-rescan: %s (controller: %s, NQN: %s)",
 					devicePath, deviceName, nqn)
@@ -420,8 +425,11 @@ func (s *NodeService) findNVMeDeviceByNQNWithController(ctx context.Context, nqn
 	// Parse the output to find controller name for this NQN
 	controllerName = s.findControllerForNQN(string(subsysOutput), nqn)
 	if controllerName != "" {
-		devicePath = fmt.Sprintf("/dev/%sn1", controllerName)
-		return devicePath, controllerName, nil
+		// Namespace device from sysfs, not /dev/<controller>n1 (wrong under multipath).
+		if devicePath, err = nvmeNamespaceDeviceForNQN(sysBlockPath, nqn); err == nil {
+			return devicePath, controllerName, nil
+		}
+		klog.V(4).Infof("Controller %s found for %s but namespace device not resolvable: %v", controllerName, nqn, err)
 	}
 
 	// Fall back to sysfs
