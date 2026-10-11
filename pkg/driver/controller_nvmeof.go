@@ -794,72 +794,63 @@ func (s *ControllerService) deleteNVMeOFVolume(ctx context.Context, meta *Volume
 		}
 	}
 
-	// Step 1: Delete ZVOL first (prevents orphaning namespace/subsystem if ZVOL can't be deleted)
-	// If the ZVOL has dependent clones, we must bail immediately — deleting namespace/subsystem
-	// would leave an orphaned ZVOL with no presentation layer, making recovery impossible.
-	zvolDeleted := true // assume deleted if DatasetID is empty
-	if meta.DatasetID != "" {
-		if err := s.deleteZVOL(ctx, meta); err != nil {
-			if tnsapi.IsDependentClones(err) {
-				// Dependent clones will never resolve on their own — bail without touching
-				// namespace/subsystem so the volume remains fully functional until clones are removed
-				klog.Warningf("ZVOL %s has dependent clones — skipping namespace/subsystem cleanup to prevent orphaning", meta.DatasetID)
-				timer.ObserveError()
-				return nil, status.Errorf(codes.FailedPrecondition,
-					"cannot delete volume %s: ZVOL %s has dependent clones; delete the cloned volumes first",
-					meta.Name, meta.DatasetID)
-			}
-			// Other ZVOL deletion error — don't touch namespace/subsystem either
-			klog.Errorf("ZVOL %s deletion failed — skipping namespace/subsystem cleanup to avoid orphaning: %v", meta.DatasetID, err)
-			timer.ObserveError()
-			return nil, status.Errorf(codes.Internal,
-				"Failed to delete ZVOL %s: %v (namespace/subsystem preserved to prevent orphaning)", meta.DatasetID, err)
-		}
-		klog.V(4).Infof("Successfully deleted ZVOL %s", meta.DatasetID)
-	}
-
-	// Step 2: ZVOL is gone — clean up NVMe-oF resources (best effort)
-	// Even if these fail, data is already deleted and K8s will retry cleanup
+	// Step 1: Remove the NVMe-oF presentation (namespace, then subsystem) BEFORE the ZVOL.
+	// The ZVOL carries the ownership properties a retried DeleteVolume uses to find this
+	// volume; deleting it first meant a failed cleanup here was never retried and the
+	// namespace/subsystem leaked. Any failure keeps the ZVOL so the next attempt can finish.
 	var deletionErrors []error
 
 	namespaceDeleted := false
 	if err := s.deleteNVMeOFNamespace(ctx, meta); err != nil {
-		klog.Errorf("Failed to delete namespace %d (ZVOL already deleted, will retry): %v", meta.NVMeOFNamespaceID, err)
+		klog.Errorf("Failed to delete namespace %d (ZVOL kept, will retry): %v", meta.NVMeOFNamespaceID, err)
 		deletionErrors = append(deletionErrors, fmt.Errorf("namespace deletion failed: %w", err))
 	} else {
 		klog.V(4).Infof("Successfully deleted namespace %d", meta.NVMeOFNamespaceID)
 		namespaceDeleted = true
 	}
 
-	// Step 3: Delete NVMe-oF subsystem (only if namespace was deleted)
+	// Then the subsystem (only once its namespace is gone)
 	if !namespaceDeleted && meta.NVMeOFNamespaceID > 0 {
 		klog.Warningf("Skipping subsystem deletion because namespace %d deletion failed - subsystem %d cannot be deleted while namespace exists",
 			meta.NVMeOFNamespaceID, meta.NVMeOFSubsystemID)
 		deletionErrors = append(deletionErrors, errSubsystemDeletionSkipped)
 	} else if err := s.deleteNVMeOFSubsystem(ctx, meta); err != nil {
-		klog.Errorf("Failed to delete subsystem %d (ZVOL already deleted, will retry): %v", meta.NVMeOFSubsystemID, err)
+		klog.Errorf("Failed to delete subsystem %d (ZVOL kept, will retry): %v", meta.NVMeOFSubsystemID, err)
 		deletionErrors = append(deletionErrors, fmt.Errorf("subsystem deletion failed: %w", err))
 	} else {
 		klog.V(4).Infof("Successfully deleted subsystem %d", meta.NVMeOFSubsystemID)
 	}
 
-	// Evaluate cleanup results
-	if len(deletionErrors) == 0 && zvolDeleted {
-		klog.Infof("Deleted NVMe-oF volume: %s (ZVOL, namespace, and subsystem)", meta.Name)
-		metrics.DeleteVolumeCapacity(meta.Name, metrics.ProtocolNVMeOF)
-		timer.ObserveSuccess()
-		return &csi.DeleteVolumeResponse{}, nil
+	if len(deletionErrors) > 0 {
+		timer.ObserveError()
+		return nil, status.Errorf(codes.Unavailable,
+			"failed to remove NVMe-oF namespace/subsystem for volume %s (ZVOL kept so the deletion can be retried): %v",
+			meta.Name, deletionErrors)
 	}
 
-	// NVMe-oF resource cleanup failed (ZVOL is already gone — data is irrecoverable, but
-	// we need to retry to avoid orphaned namespace/subsystem on TrueNAS)
-	klog.Errorf("ZVOL deleted but failed to clean up %d NVMe-oF resource(s) for %s: %v",
-		len(deletionErrors), meta.Name, deletionErrors)
+	// Step 2: Delete the ZVOL last. If it still has dependent clones the deletion fails with
+	// FailedPrecondition; the ZVOL keeps its properties, so a later retry finds it again.
+	if meta.DatasetID != "" {
+		if err := s.deleteZVOL(ctx, meta); err != nil {
+			if tnsapi.IsDependentClones(err) {
+				klog.Warningf("ZVOL %s has dependent clones — cannot delete it until the clones are removed", meta.DatasetID)
+				timer.ObserveError()
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"cannot delete volume %s: ZVOL %s has dependent clones; delete the cloned volumes first",
+					meta.Name, meta.DatasetID)
+			}
+			klog.Errorf("ZVOL %s deletion failed: %v", meta.DatasetID, err)
+			timer.ObserveError()
+			return nil, status.Errorf(codes.Internal,
+				"Failed to delete ZVOL %s: %v", meta.DatasetID, err)
+		}
+		klog.V(4).Infof("Successfully deleted ZVOL %s", meta.DatasetID)
+	}
 
-	timer.ObserveError()
-	return nil, status.Errorf(codes.Internal,
-		"ZVOL deleted but failed to clean up NVMe-oF resources for %s (will retry): %v",
-		meta.Name, deletionErrors)
+	klog.Infof("Deleted NVMe-oF volume: %s (namespace, subsystem and ZVOL)", meta.Name)
+	metrics.DeleteVolumeCapacity(meta.Name, metrics.ProtocolNVMeOF)
+	timer.ObserveSuccess()
+	return &csi.DeleteVolumeResponse{}, nil
 }
 
 // deleteNVMeOFSubsystem deletes an NVMe-oF subsystem with retry logic for busy resources.

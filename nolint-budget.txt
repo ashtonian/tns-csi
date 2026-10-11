@@ -2,7 +2,7 @@ contextcheck 14
 dupl 27
 errcheck 62
 errchkjson 2
-gocognit 2
+gocognit 1
 gocritic 2
 gocyclo 2
 gosec 56

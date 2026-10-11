@@ -529,19 +529,20 @@ func TestDeleteNVMeOFVolume(t *testing.T) {
 				NVMeOFNamespaceID: 200,
 			},
 			mockSetup: func(m *MockAPIClientForSnapshots) {
-				zvolDeleted := false
+				// Order: namespace, then subsystem, then the ZVOL last (the ZVOL holds the
+				// properties a retried DeleteVolume needs to find the volume again).
+				subsystemDeleted := false
 				namespaceDeleted := false
 				m.DeleteDatasetFunc = func(ctx context.Context, datasetID string) error {
 					if datasetID != "tank/test-nvmeof-volume" {
 						t.Errorf("Expected dataset ID tank/test-nvmeof-volume, got %s", datasetID)
 					}
-					zvolDeleted = true
+					if !subsystemDeleted {
+						t.Error("Expected namespace and subsystem to be deleted before the ZVOL")
+					}
 					return nil
 				}
 				m.DeleteNVMeOFNamespaceFunc = func(ctx context.Context, namespaceID int) error {
-					if !zvolDeleted {
-						t.Error("Expected ZVOL to be deleted before namespace")
-					}
 					if namespaceID != 200 {
 						t.Errorf("Expected namespace ID 200, got %d", namespaceID)
 					}
@@ -558,6 +559,7 @@ func TestDeleteNVMeOFVolume(t *testing.T) {
 					if subsystemID != 100 {
 						t.Errorf("Expected subsystem ID 100, got %d", subsystemID)
 					}
+					subsystemDeleted = true
 					return nil
 				}
 			},
