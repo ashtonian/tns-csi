@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"k8s.io/klog/v2"
@@ -20,6 +21,15 @@ var errNVMeAmbiguousNamespace = errors.New("ambiguous NVMe namespace devices for
 // nvmeNamespaceName matches visible namespace block devices (nvme0n1). It excludes
 // partitions (nvme0n1p1) and the hidden per-path devices of native multipath (nvme0c1n1).
 var nvmeNamespaceName = regexp.MustCompile(`^nvme\d+n\d+$`)
+
+// nvmeNamespacePartition matches a partition of a namespace device (nvme0n1p1).
+var nvmeNamespacePartition = regexp.MustCompile(`^(nvme\d+n\d+)p\d+$`)
+
+// nvmeControllerDirName matches controller entries (nvme0) in sysfs.
+var nvmeControllerDirName = regexp.MustCompile(`^nvme\d+$`)
+
+// errNVMeNoController means a namespace's sysfs owner exposes no controller.
+var errNVMeNoController = errors.New("no NVMe controller for namespace")
 
 // nvmeNamespaceDeviceForNQN returns the namespace block device (/dev/nvmeXnY) that belongs
 // to the subsystem with the given NQN.
@@ -95,4 +105,70 @@ func readSysfsValue(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// nvmeControllerForNamespace returns the controller (/dev/nvmeN) serving an NVMe namespace
+// device, and that controller's state ("live", "connecting", ...).
+//
+// The controller cannot be derived from the device name: with native multipath,
+// /dev/nvme1n1 is named after subsystem instance 1, and "nvme1" may be another volume's
+// controller. The namespace's "device" link points at its owner instead: a controller
+// without multipath, or the nvme-subsysN subsystem with multipath, whose directory lists
+// its controllers (paths). Of those, a live one is preferred, then the lowest-numbered.
+func nvmeControllerForNamespace(sysBlock, devicePath string) (controller, state string, err error) {
+	name := filepath.Base(devicePath)
+	if m := nvmeNamespacePartition.FindStringSubmatch(name); m != nil {
+		name = m[1]
+	}
+	if !nvmeNamespaceName.MatchString(name) {
+		return "", "", fmt.Errorf("%s: %w", devicePath, ErrNVMeNotNVMeDevice)
+	}
+	owner, err := filepath.EvalSymlinks(filepath.Join(sysBlock, name, "device"))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve sysfs owner of %s: %w", devicePath, err)
+	}
+
+	ownerName := filepath.Base(owner)
+	if nvmeControllerDirName.MatchString(ownerName) {
+		state, err := readSysfsValue(filepath.Join(owner, "state"))
+		if err != nil {
+			return "", "", fmt.Errorf("failed to read state of %s: %w", ownerName, err)
+		}
+		return "/dev/" + ownerName, state, nil
+	}
+
+	entries, err := os.ReadDir(owner)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to list controllers of %s: %w", ownerName, err)
+	}
+	var ctrls []string
+	for _, e := range entries {
+		if nvmeControllerDirName.MatchString(e.Name()) {
+			ctrls = append(ctrls, e.Name())
+		}
+	}
+	if len(ctrls) == 0 {
+		return "", "", fmt.Errorf("%w: %s (owner %s)", errNVMeNoController, devicePath, ownerName)
+	}
+	sort.Slice(ctrls, func(i, j int) bool { return nvmeIndex(ctrls[i]) < nvmeIndex(ctrls[j]) })
+	for _, c := range ctrls {
+		if st, readErr := readSysfsValue(filepath.Join(owner, c, "state")); readErr == nil && st == "live" {
+			return "/dev/" + c, st, nil
+		}
+	}
+	// No live path: report the first controller with its own state (empty if unreadable).
+	firstState, err := readSysfsValue(filepath.Join(owner, ctrls[0], "state"))
+	if err != nil {
+		firstState = ""
+	}
+	return "/dev/" + ctrls[0], firstState, nil
+}
+
+// nvmeIndex returns N for a controller name "nvmeN" (names come from nvmeControllerDirName).
+func nvmeIndex(name string) int {
+	n := 0
+	for _, c := range strings.TrimPrefix(name, "nvme") {
+		n = n*10 + int(c-'0')
+	}
+	return n
 }

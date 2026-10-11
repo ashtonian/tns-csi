@@ -210,12 +210,16 @@ func (s *NodeService) findNVMeDeviceByNQN(ctx context.Context, nqn string) (stri
 	return s.findNVMeDeviceByNQNFromSys(ctx, nqn)
 }
 
-// runNVMeListSubsys executes nvme list-subsys and returns the output.
-func (s *NodeService) runNVMeListSubsys(ctx context.Context) ([]byte, error) {
+// nvmeListSubsysCmd runs "nvme list-subsys -o json". Tests replace it.
+var nvmeListSubsysCmd = func(ctx context.Context) ([]byte, error) {
 	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	subsysCmd := cmdexec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
-	return subsysCmd.CombinedOutput()
+	return cmdexec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json").CombinedOutput()
+}
+
+// runNVMeListSubsys executes nvme list-subsys and returns the output.
+func (s *NodeService) runNVMeListSubsys(ctx context.Context) ([]byte, error) {
+	return nvmeListSubsysCmd(ctx)
 }
 
 // parseNVMeListSubsysOutputForNQN parses nvme list-subsys JSON output to find device path.
@@ -242,7 +246,7 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 	klog.V(4).Infof("Searching for NVMe device via sysfs: NQN=%s (NSID=1)", nqn)
 
 	// Read /sys/class/nvme/nvmeX/subsysnqn for each device
-	nvmeDir := "/sys/class/nvme"
+	nvmeDir := sysClassNVMePath
 	entries, err := os.ReadDir(nvmeDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to read %s: %w", nvmeDir, err)
@@ -281,7 +285,12 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 			// as /dev/<controller>n1 (wrong under native NVMe multipath).
 			devicePath := nvmeNamespaceDeviceOrEmpty(nqn)
 			// Check if device exists AND is healthy (non-zero size block device)
-			if _, err := os.Stat(devicePath); devicePath != "" && err == nil {
+			devicePresent := false
+			if devicePath != "" {
+				_, statErr := os.Stat(devicePath)
+				devicePresent = statErr == nil
+			}
+			if devicePresent {
 				if s.isDeviceHealthy(ctx, devicePath) {
 					klog.V(4).Infof("Found healthy NVMe device from sysfs: %s (controller: %s, NQN: %s)",
 						devicePath, deviceName, nqn)
@@ -296,7 +305,10 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 			// Check again after rescan - device must exist AND be healthy
 			devicePath = nvmeNamespaceDeviceOrEmpty(nqn)
 			if devicePath == "" {
-				return "", fmt.Errorf("%w for NQN %s after ns-rescan (controller: %s)", ErrNVMeDeviceNotFound, nqn, deviceName)
+				// The controller is connected but exposes no namespace even after a rescan:
+				// report it as unhealthy (not "not found") so a stale connection is torn down
+				// right away instead of after a full reconnect-and-wait cycle.
+				return "", fmt.Errorf("%w: no namespace for NQN %s after ns-rescan (controller: %s)", ErrNVMeDeviceUnhealthy, nqn, deviceName)
 			}
 			if _, err := os.Stat(devicePath); err == nil && s.isDeviceHealthy(ctx, devicePath) {
 				klog.V(4).Infof("Found healthy NVMe device after ns-rescan: %s (controller: %s, NQN: %s)",
@@ -322,6 +334,11 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 // forceNamespaceRescan forces the kernel to rescan namespaces on an NVMe controller.
 // This is a lightweight version that just does ns-rescan without full udev processing.
 func (s *NodeService) forceNamespaceRescan(ctx context.Context, controllerPath string) {
+	nvmeNSRescanCmd(ctx, controllerPath)
+}
+
+// nvmeNSRescanCmd runs "nvme ns-rescan" on a controller, best effort. Tests replace it.
+var nvmeNSRescanCmd = func(ctx context.Context, controllerPath string) {
 	rescanCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -350,6 +367,17 @@ func (s *NodeService) waitForNVMeDevice(ctx context.Context, nqn string, timeout
 
 	klog.V(4).Infof("Waiting for NVMe device for NQN %s (timeout: %v)", nqn, timeout)
 
+	// rescanOnCadence rescans a controller the first time it is seen, then every 5th poll.
+	rescanOnCadence := func(controllerName, devicePath string) {
+		if controllerName != lastControllerFound {
+			klog.V(4).Infof("Found controller %s for NQN %s but device %q is not there yet, forcing ns-rescan", controllerName, nqn, devicePath)
+			lastControllerFound = controllerName
+			s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
+		} else if attempt%5 == 0 {
+			s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
+		}
+	}
+
 	for time.Now().Before(deadline) {
 		attempt++
 
@@ -370,24 +398,19 @@ func (s *NodeService) waitForNVMeDevice(ctx context.Context, nqn string, timeout
 				}
 			} else if controllerName != "" {
 				// Device path doesn't exist but we found the controller - try ns-rescan
-				if controllerName != lastControllerFound {
-					klog.V(4).Infof("Found controller %s for NQN %s but device %s doesn't exist, forcing ns-rescan", controllerName, nqn, devicePath)
-					lastControllerFound = controllerName
-					// First time seeing this controller - do immediate rescan
-					s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
-				} else if attempt%5 == 0 {
-					// Periodic rescan every 5 attempts
-					s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
-				}
+				rescanOnCadence(controllerName, devicePath)
 			}
 		case errors.Is(err, ErrNVMeDeviceUnhealthy):
 			// Device found but unhealthy - keep waiting, periodic rescan
 			klog.V(4).Infof("NVMe device found but still initializing (unhealthy), waiting... (attempt %d, path: %s)", attempt, devicePath)
-			if attempt%5 == 0 {
-				if ctrl := extractNVMeController(devicePath); ctrl != "" {
+			if attempt%5 == 0 && devicePath != "" {
+				if ctrl, _, ctrlErr := nvmeControllerForNamespace(sysBlockPath, devicePath); ctrlErr == nil {
 					s.forceNamespaceRescan(ctx, ctrl)
 				}
 			}
+		case controllerName != "":
+			// Controller connected, namespace not visible yet.
+			rescanOnCadence(controllerName, devicePath)
 		default:
 			// Can't find device - do diagnostic dump every 10 attempts
 			if attempt%10 == 0 {
@@ -430,7 +453,10 @@ func (s *NodeService) findNVMeDeviceByNQNWithController(ctx context.Context, nqn
 		if devicePath, err = nvmeNamespaceDeviceForNQN(sysBlockPath, nqn); err == nil {
 			return devicePath, controllerName, nil
 		}
-		klog.V(4).Infof("Controller %s found for %s but namespace device not resolvable: %v", controllerName, nqn, err)
+		// The controller is known; the caller decides when to rescan it. Falling through to
+		// the sysfs scan here would rescan on every poll and drop the controller name.
+		klog.V(4).Infof("Controller %s found for %s but namespace device not resolvable yet: %v", controllerName, nqn, err)
+		return "", controllerName, err
 	}
 
 	// Fall back to sysfs

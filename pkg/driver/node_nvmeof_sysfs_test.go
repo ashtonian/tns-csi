@@ -20,6 +20,9 @@ func fakeSysBlock(t *testing.T, owners, devs, nsids map[string]string) string {
 	root := t.TempDir()
 	block := filepath.Join(root, "block")
 	ownersDir := filepath.Join(root, "owners")
+	if err := os.MkdirAll(block, 0o755); err != nil { // real sysfs always has /sys/block
+		t.Fatal(err)
+	}
 	for owner, nqn := range owners {
 		dir := filepath.Join(ownersDir, owner)
 		if err := os.MkdirAll(dir, 0o755); err != nil {

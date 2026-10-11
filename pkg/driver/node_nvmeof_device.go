@@ -277,10 +277,10 @@ func isNVMeControllerName(name string) bool {
 
 // rescanNVMeNamespace rescans an NVMe namespace to ensure the kernel has fresh device data.
 func (s *NodeService) rescanNVMeNamespace(ctx context.Context, devicePath string) error {
-	// Extract controller path from device path (e.g., /dev/nvme0n1 -> /dev/nvme0)
-	controllerPath := extractNVMeController(devicePath)
-	if controllerPath == "" {
-		return fmt.Errorf("%w: %s", ErrNVMeControllerNotFound, devicePath)
+	// Resolve the controller from sysfs; the device name does not identify it under multipath.
+	controllerPath, _, err := nvmeControllerForNamespace(sysBlockPath, devicePath)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrNVMeControllerNotFound, devicePath, err)
 	}
 
 	klog.V(4).Infof("Rescanning NVMe namespace on controller %s (device: %s)", controllerPath, devicePath)
@@ -299,16 +299,3 @@ func (s *NodeService) rescanNVMeNamespace(ctx context.Context, devicePath string
 	return nil
 }
 
-// extractNVMeController extracts the controller device path from a namespace device path
-// (e.g., /dev/nvme0n1 -> /dev/nvme0, /dev/nvme1n2 -> /dev/nvme1).
-func extractNVMeController(devicePath string) string {
-	// Find the position of 'n' followed by a digit (the namespace part)
-	for i := len(devicePath) - 1; i >= 0; i-- {
-		if devicePath[i] == 'n' && i > 0 && devicePath[i-1] >= '0' && devicePath[i-1] <= '9' {
-			if i+1 < len(devicePath) && devicePath[i+1] >= '0' && devicePath[i+1] <= '9' {
-				return devicePath[:i]
-			}
-		}
-	}
-	return ""
-}

@@ -1,8 +1,6 @@
 package driver
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -135,17 +133,11 @@ func TestCheckBasicHealth(t *testing.T) {
 func TestGetNVMeControllerState(t *testing.T) {
 	// Point the sysfs lookup at a controlled directory so the test does not
 	// depend on which NVMe devices happen to be present on the host runner.
-	sysRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(sysRoot, "nvme0"), 0o755); err != nil {
-		t.Fatalf("failed to set up fake sysfs: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(sysRoot, "nvme0", "state"), []byte("live\n"), 0o600); err != nil {
-		t.Fatalf("failed to write fake state: %v", err)
-	}
-
-	origPath := sysClassNVMePath
-	sysClassNVMePath = sysRoot
-	t.Cleanup(func() { sysClassNVMePath = origPath })
+	block := fakeSysBlock(t, map[string]string{"nvme0": nqnA}, map[string]string{"nvme0n1": "nvme0"}, nil)
+	fakeControllers(t, block, "nvme0", map[string]string{"nvme0": "live"})
+	origPath := sysBlockPath
+	sysBlockPath = block
+	t.Cleanup(func() { sysBlockPath = origPath })
 
 	tests := []struct {
 		name       string

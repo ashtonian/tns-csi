@@ -292,26 +292,14 @@ func getNVMeControllerState(devicePath string) (string, error) {
 		return "", fmt.Errorf("%w: %s", errNotNVMeDevice, devicePath)
 	}
 
-	// Extract controller name (nvme0 from nvme0n1)
-	var ctrlName string
-	for i, c := range base {
-		if c == 'n' && i > 4 { // Skip "nvme" prefix
-			ctrlName = base[:i]
-			break
-		}
-	}
-	if ctrlName == "" {
-		ctrlName = base // Fallback
-	}
-
-	// Read state from /sys/class/nvme/<ctrl>/state
-	statePath := filepath.Join(sysClassNVMePath, ctrlName, "state")
-	data, err := os.ReadFile(statePath) //nolint:gosec // path is constructed from device name
+	// The controller comes from the namespace's sysfs owner, not from its name: under
+	// native multipath /dev/nvme1n1 may be served by nvme0/nvme2, and nvme1 may belong to
+	// another volume. With several paths, a live one is reported if there is any.
+	_, state, err := nvmeControllerForNamespace(sysBlockPath, devicePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read NVMe state: %w", err)
 	}
-
-	return strings.TrimSpace(string(data)), nil
+	return state, nil
 }
 
 // getISCSISessionState gets the state of an iSCSI session for a device.
