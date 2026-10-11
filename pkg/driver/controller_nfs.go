@@ -366,12 +366,15 @@ func (s *ControllerService) handleExistingNFSVolume(ctx context.Context, params 
 //
 //nolint:dupl // Intentionally similar property-recovery pattern as SMB
 func (s *ControllerService) ensureNFSProperties(ctx context.Context, datasetID string, params *nfsVolumeParams, share *tnsapi.NFSShare) {
-	existing, err := s.apiClient.GetDatasetProperties(ctx, datasetID, []string{tnsapi.PropertyManagedBy})
+	// Key on the presentation IDs, not managed_by: ownership properties are written by the
+	// create call itself, so managed_by being set says nothing about whether these were.
+	recoveryKeys := []string{tnsapi.PropertyNFSShareID}
+	existing, err := s.apiClient.GetDatasetProperties(ctx, datasetID, recoveryKeys)
 	if err != nil {
 		klog.Warningf("Failed to check properties on dataset %s: %v (skipping property recovery)", datasetID, err)
 		return
 	}
-	if existing[tnsapi.PropertyManagedBy] == tnsapi.ManagedByValue {
+	if presentationPropertiesRecorded(existing, recoveryKeys) {
 		return // Properties already set
 	}
 

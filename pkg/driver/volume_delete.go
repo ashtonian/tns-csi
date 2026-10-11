@@ -93,3 +93,15 @@ func (s *ControllerService) readVolumeOwnership(ctx context.Context, meta *Volum
 	}
 	return o, nil
 }
+
+// presentationPropertiesRecorded reports whether every key in keys has a non-empty value.
+// DeleteVolume reads share/target/namespace IDs from these properties only, so a volume
+// missing any of them would leak its presentation objects on delete.
+func presentationPropertiesRecorded(props map[string]string, keys []string) bool {
+	for _, k := range keys {
+		if props[k] == "" {
+			return false
+		}
+	}
+	return true
+}

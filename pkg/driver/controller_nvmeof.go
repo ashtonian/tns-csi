@@ -376,12 +376,15 @@ func (s *ControllerService) handleExistingNVMeOFVolume(ctx context.Context, para
 // ensureNVMeOFProperties checks if ZFS properties are set on the ZVOL and sets them if missing.
 // This handles the case where a ZVOL was created but context expired before properties were set.
 func (s *ControllerService) ensureNVMeOFProperties(ctx context.Context, zvolID string, params *nvmeofVolumeParams, subsystem *tnsapi.NVMeOFSubsystem, namespace *tnsapi.NVMeOFNamespace) {
-	existing, err := s.apiClient.GetDatasetProperties(ctx, zvolID, []string{tnsapi.PropertyManagedBy})
+	// Key on the presentation IDs, not managed_by: ownership properties are written by the
+	// create call itself, so managed_by being set says nothing about whether these were.
+	recoveryKeys := []string{tnsapi.PropertyNVMeSubsystemID, tnsapi.PropertyNVMeNamespaceID}
+	existing, err := s.apiClient.GetDatasetProperties(ctx, zvolID, recoveryKeys)
 	if err != nil {
 		klog.Warningf("Failed to check properties on ZVOL %s: %v (skipping property recovery)", zvolID, err)
 		return
 	}
-	if existing[tnsapi.PropertyManagedBy] == tnsapi.ManagedByValue {
+	if presentationPropertiesRecorded(existing, recoveryKeys) {
 		return // Properties already set
 	}
 

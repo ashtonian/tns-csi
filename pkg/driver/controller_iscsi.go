@@ -513,12 +513,15 @@ func (s *ControllerService) findISCSIVolumeByStoredProperties(ctx context.Contex
 // ensureISCSIProperties checks if ZFS properties are set on the ZVOL and sets them if missing.
 // This handles the case where a ZVOL was created but context expired before properties were set.
 func (s *ControllerService) ensureISCSIProperties(ctx context.Context, zvolID string, params *iscsiVolumeParams, target *tnsapi.ISCSITarget, extent *tnsapi.ISCSIExtent, fullIQN string) {
-	existing, err := s.apiClient.GetDatasetProperties(ctx, zvolID, []string{tnsapi.PropertyManagedBy})
+	// Key on the presentation IDs, not managed_by: ownership properties are written by the
+	// create call itself, so managed_by being set says nothing about whether these were.
+	recoveryKeys := []string{tnsapi.PropertyISCSITargetID, tnsapi.PropertyISCSIExtentID}
+	existing, err := s.apiClient.GetDatasetProperties(ctx, zvolID, recoveryKeys)
 	if err != nil {
 		klog.Warningf("Failed to check properties on ZVOL %s: %v (skipping property recovery)", zvolID, err)
 		return
 	}
-	if existing[tnsapi.PropertyManagedBy] == tnsapi.ManagedByValue {
+	if presentationPropertiesRecorded(existing, recoveryKeys) {
 		return // Properties already set
 	}
 

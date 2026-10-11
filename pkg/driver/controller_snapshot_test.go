@@ -58,6 +58,7 @@ type MockAPIClientForSnapshots struct {
 	DeleteISCSIExtentFunc          func(ctx context.Context, id int) error
 	DeleteISCSITargetFunc          func(ctx context.Context, id int) error
 	GetDatasetPropertiesFunc       func(ctx context.Context, datasetID string, propertyNames []string) (map[string]string, error)
+	SetDatasetPropertiesFunc       func(ctx context.Context, datasetID string, properties map[string]string) error
 }
 
 func (m *MockAPIClientForSnapshots) CreateSnapshot(ctx context.Context, params tnsapi.SnapshotCreateParams) (*tnsapi.Snapshot, error) {
@@ -311,7 +312,9 @@ func (m *MockAPIClientForSnapshots) QuerySubsystemPortBindings(ctx context.Conte
 // ZFS User Property methods - mock implementations for Phase 1
 
 func (m *MockAPIClientForSnapshots) SetDatasetProperties(ctx context.Context, datasetID string, properties map[string]string) error {
-	// Mock implementation - always succeed
+	if m.SetDatasetPropertiesFunc != nil {
+		return m.SetDatasetPropertiesFunc(ctx, datasetID, properties)
+	}
 	return nil
 }
 
