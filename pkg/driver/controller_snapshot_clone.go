@@ -336,6 +336,20 @@ func (s *ControllerService) validateCloneParameters(req *csi.CreateVolumeRequest
 		newDatasetName: newDatasetName,
 	}
 
+	// Ownership goes into the clone call itself (pool.snapshot.clone dataset_properties), so a
+	// failed post-clone SetDatasetProperties can't leave a clone without tns-csi:managed_by.
+	if snapshotMeta.Protocol != "" {
+		deleteStrategy := params["deleteStrategy"]
+		if deleteStrategy == "" {
+			deleteStrategy = tnsapi.DeleteStrategyDelete
+		}
+		capacity := req.GetCapacityRange().GetRequiredBytes()
+		if capacity == 0 {
+			capacity = 1 * 1024 * 1024 * 1024 // Default 1GB, matching the post-clone property write
+		}
+		cp.datasetProperties = tnsapi.OwnershipPropertiesV1(newVolumeName, snapshotMeta.Protocol, deleteStrategy, s.clusterID, capacity)
+	}
+
 	// SMB clones: Do NOT set explicit acltype/aclmode/aclinherit properties.
 	// ZFS clones inherit ACL properties and data from the origin snapshot, which
 	// was created with share_type: "SMB" (setting nfsv4 ACLs). Explicitly setting
@@ -586,7 +600,7 @@ func (s *ControllerService) executeDetachedSnapshotRestore(ctx context.Context, 
 // cleanupPartialClone attempts to clean up a partially created cloned dataset.
 func (s *ControllerService) cleanupPartialClone(ctx context.Context, datasetName string) {
 	if delErr := s.apiClient.DeleteDataset(ctx, datasetName); delErr != nil {
-		if !isNotFoundError(delErr) {
+		if !tnsapi.IsNotFound(delErr) {
 			klog.Errorf("Failed to cleanup potentially partially-created dataset %s: %v", datasetName, delErr)
 		}
 	} else {

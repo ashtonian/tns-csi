@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +11,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
+
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 )
 
 // Block-device helpers shared by the iSCSI and NVMe-oF node paths.
@@ -44,7 +45,7 @@ func waitForDeviceInitialization(ctx context.Context, devicePath string) error {
 
 		// Get device size using blockdev
 		sizeCtx, sizeCancel := context.WithTimeout(ctx, 3*time.Second)
-		cmd := exec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
+		cmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
 		output, err := cmd.CombinedOutput()
 		sizeCancel()
 
@@ -79,7 +80,7 @@ func forceDeviceRescan(ctx context.Context, devicePath string) error {
 	// Step 1: Sync and flush device buffers
 	syncCtx, syncCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer syncCancel()
-	syncCmd := exec.CommandContext(syncCtx, "sync")
+	syncCmd := cmdexec.CommandContext(syncCtx, "sync")
 	if output, err := syncCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("sync command failed: %v, output: %s", err, string(output))
 	}
@@ -87,7 +88,7 @@ func forceDeviceRescan(ctx context.Context, devicePath string) error {
 	// Step 2: Flush device buffers
 	flushCtx, flushCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer flushCancel()
-	flushCmd := exec.CommandContext(flushCtx, "blockdev", "--flushbufs", devicePath)
+	flushCmd := cmdexec.CommandContext(flushCtx, "blockdev", "--flushbufs", devicePath)
 	if output, err := flushCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("blockdev --flushbufs failed for %s: %v, output: %s", devicePath, err, string(output))
 	} else {
@@ -97,7 +98,7 @@ func forceDeviceRescan(ctx context.Context, devicePath string) error {
 	// Step 3: Trigger udev to re-process the device
 	udevCtx, udevCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer udevCancel()
-	udevCmd := exec.CommandContext(udevCtx, "udevadm", "trigger", "--action=change", devicePath)
+	udevCmd := cmdexec.CommandContext(udevCtx, "udevadm", "trigger", "--action=change", devicePath)
 	if output, err := udevCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm trigger failed for %s: %v, output: %s", devicePath, err, string(output))
 	} else {
@@ -107,7 +108,7 @@ func forceDeviceRescan(ctx context.Context, devicePath string) error {
 	// Step 4: Wait for udev to settle
 	settleCtx, settleCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer settleCancel()
-	settleCmd := exec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=5")
+	settleCmd := cmdexec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=5")
 	if output, err := settleCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm settle failed: %v, output: %s", err, string(output))
 	} else {
@@ -194,7 +195,7 @@ func (s *NodeService) logDeviceInfo(ctx context.Context, devicePath string) {
 	// Get actual device size using blockdev
 	sizeCtx, sizeCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer sizeCancel()
-	sizeCmd := exec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
+	sizeCmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
 	if sizeOutput, err := sizeCmd.CombinedOutput(); err == nil {
 		deviceSize := strings.TrimSpace(string(sizeOutput))
 		klog.V(4).Infof("Device %s has size: %s bytes", devicePath, deviceSize)
@@ -205,7 +206,7 @@ func (s *NodeService) logDeviceInfo(ctx context.Context, devicePath string) {
 	// Try to get device UUID (for better tracking)
 	uuidCtx, uuidCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer uuidCancel()
-	blkidCmd := exec.CommandContext(uuidCtx, "blkid", "-s", "UUID", "-o", "value", devicePath)
+	blkidCmd := cmdexec.CommandContext(uuidCtx, "blkid", "-s", "UUID", "-o", "value", devicePath)
 	if uuidOutput, err := blkidCmd.CombinedOutput(); err == nil && len(uuidOutput) > 0 {
 		uuid := strings.TrimSpace(string(uuidOutput))
 		if uuid != "" {
@@ -216,7 +217,7 @@ func (s *NodeService) logDeviceInfo(ctx context.Context, devicePath string) {
 	// Try to get filesystem type
 	fsTypeCtx, fsTypeCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer fsTypeCancel()
-	fsCmd := exec.CommandContext(fsTypeCtx, "blkid", "-s", "TYPE", "-o", "value", devicePath)
+	fsCmd := cmdexec.CommandContext(fsTypeCtx, "blkid", "-s", "TYPE", "-o", "value", devicePath)
 	if fsOutput, err := fsCmd.CombinedOutput(); err == nil && len(fsOutput) > 0 {
 		fsType := strings.TrimSpace(string(fsOutput))
 		if fsType != "" {
@@ -257,7 +258,7 @@ func (s *NodeService) verifyDeviceSize(ctx context.Context, devicePath string, v
 func getBlockDeviceSize(ctx context.Context, devicePath string) (int64, error) {
 	sizeCtx, sizeCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer sizeCancel()
-	sizeCmd := exec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
+	sizeCmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
 	sizeOutput, err := sizeCmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get device size: %w", err)

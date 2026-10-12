@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -83,10 +84,7 @@ func (s *NodeService) publishBlockVolume(ctx context.Context, stagingTargetPath,
 	args := []string{"-o", mount.JoinMountOptions(mountOptions), stagingTargetPath, targetPath}
 
 	klog.V(4).Infof("Executing bind mount command: mount %v", args)
-	mountCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runMount(ctx, 15*time.Second, args...)
 	if err != nil {
 		// Cleanup: remove target file on failure
 		if removeErr := os.Remove(targetPath); removeErr != nil && !os.IsNotExist(removeErr) {
@@ -139,10 +137,7 @@ func (s *NodeService) publishFilesystemVolume(ctx context.Context, stagingTarget
 	args := []string{"-o", mount.JoinMountOptions(mountOptions), stagingTargetPath, targetPath}
 
 	klog.V(4).Infof("Executing bind mount command: mount %v", args)
-	mountCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runMount(ctx, 15*time.Second, args...)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to bind mount filesystem: %v, output: %s", err, string(output))
 	}
@@ -206,7 +201,7 @@ func invalidateDeviceCache(ctx context.Context, devicePath string, attempt int) 
 	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(flushCtx, "blockdev", "--flushbufs", devicePath)
+	cmd := cmdexec.CommandContext(flushCtx, "blockdev", "--flushbufs", devicePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.V(4).Infof("blockdev --flushbufs failed for %s (attempt %d): %v, output: %s",
@@ -221,7 +216,7 @@ func invalidateDeviceCache(ctx context.Context, devicePath string, attempt int) 
 	settleCtx, cancelSettle := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelSettle()
 
-	settleCmd := exec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=5")
+	settleCmd := cmdexec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=5")
 	settleOutput, settleErr := settleCmd.CombinedOutput()
 	if settleErr != nil {
 		klog.V(4).Infof("udevadm settle failed (attempt %d): %v, output: %s",
@@ -400,7 +395,7 @@ func waitWithBackoff(ctx context.Context, devicePath string, attempt, maxRetries
 // Returns (needsFormat, output, error).
 func checkDeviceFilesystem(ctx context.Context, devicePath string) (needsFormat bool, output []byte, err error) {
 	return checkDeviceFilesystemWithProbe(ctx, devicePath, func(probeCtx context.Context, path string) ([]byte, error) {
-		return exec.CommandContext(probeCtx, blkidPath, "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", path).CombinedOutput()
+		return cmdexec.CommandContext(probeCtx, blkidPath, "-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", path).CombinedOutput()
 	})
 }
 
@@ -409,7 +404,7 @@ func checkDeviceFilesystemWithProbe(ctx context.Context, devicePath string, prob
 	defer cancel()
 
 	// First, check with lsblk to verify device exists and get basic info
-	lsblkCmd := exec.CommandContext(checkCtx, "lsblk", "-n", "-o", "FSTYPE", devicePath)
+	lsblkCmd := cmdexec.CommandContext(checkCtx, "lsblk", "-n", "-o", "FSTYPE", devicePath)
 	lsblkOutput, lsblkErr := lsblkCmd.CombinedOutput()
 
 	if lsblkErr != nil {
@@ -434,7 +429,7 @@ func checkDeviceFilesystemWithProbe(ctx context.Context, devicePath string, prob
 	// lsblk shows a filesystem type - verify with blkid
 	klog.V(4).Infof("lsblk shows device %s has filesystem type: %s", devicePath, fstype)
 
-	blkidCmd := exec.CommandContext(checkCtx, "blkid", devicePath)
+	blkidCmd := cmdexec.CommandContext(checkCtx, "blkid", devicePath)
 	blkidOutput, blkidErr := blkidCmd.CombinedOutput()
 
 	if blkidErr == nil {
@@ -523,9 +518,9 @@ func formatDevice(ctx context.Context, volumeID, devicePath, fsType string) erro
 	switch fsType {
 	case fsTypeExt4:
 		// -F force, don't ask for confirmation
-		cmd = exec.CommandContext(formatCtx, "mkfs.ext4", "-F", devicePath)
+		cmd = cmdexec.CommandContext(formatCtx, "mkfs.ext4", "-F", devicePath)
 	case fsTypeExt3:
-		cmd = exec.CommandContext(formatCtx, "mkfs.ext3", "-F", devicePath)
+		cmd = cmdexec.CommandContext(formatCtx, "mkfs.ext3", "-F", devicePath)
 	case fsTypeXFS:
 		// -f force overwrite
 		// Explicitly pass the logical sector size to avoid mismatches when the
@@ -539,7 +534,7 @@ func formatDevice(ctx context.Context, volumeID, devicePath, fsType string) erro
 			klog.V(4).Infof("Could not detect logical sector size for %s, using mkfs.xfs default: %v", devicePath, err)
 		}
 		args = append(args, devicePath)
-		cmd = exec.CommandContext(formatCtx, "mkfs.xfs", args...)
+		cmd = cmdexec.CommandContext(formatCtx, "mkfs.xfs", args...)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnsupportedFSType, fsType)
 	}

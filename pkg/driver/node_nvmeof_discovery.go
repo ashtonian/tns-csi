@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
+
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 )
 
 // getSubsystemState returns the connection state of an NVMe subsystem ("live", "connecting", etc.)
@@ -21,7 +22,7 @@ func getSubsystemState(ctx context.Context, nqn string) string {
 	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
+	cmd := cmdexec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.V(4).Infof("nvme list-subsys failed: %v", err)
@@ -158,7 +159,7 @@ func triggerUdevForNVMeSubsystem(ctx context.Context) {
 	// Trigger udev to process any new NVMe devices
 	triggerCtx, triggerCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer triggerCancel()
-	triggerCmd := exec.CommandContext(triggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=nvme")
+	triggerCmd := cmdexec.CommandContext(triggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=nvme")
 	if output, err := triggerCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm trigger for NVMe subsystem failed: %v, output: %s (continuing anyway)", err, string(output))
 	} else {
@@ -168,7 +169,7 @@ func triggerUdevForNVMeSubsystem(ctx context.Context) {
 	// Also trigger block subsystem in case block devices need processing
 	blockTriggerCtx, blockTriggerCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer blockTriggerCancel()
-	blockTriggerCmd := exec.CommandContext(blockTriggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=block")
+	blockTriggerCmd := cmdexec.CommandContext(blockTriggerCtx, "udevadm", "trigger", "--action=add", "--subsystem-match=block")
 	if output, err := blockTriggerCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm trigger for block subsystem failed: %v, output: %s (continuing anyway)", err, string(output))
 	} else {
@@ -178,7 +179,7 @@ func triggerUdevForNVMeSubsystem(ctx context.Context) {
 	// Wait for udev to settle (process the events)
 	settleCtx, settleCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer settleCancel()
-	settleCmd := exec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=10")
+	settleCmd := cmdexec.CommandContext(settleCtx, "udevadm", "settle", "--timeout=10")
 	if output, err := settleCmd.CombinedOutput(); err != nil {
 		klog.V(4).Infof("udevadm settle failed: %v, output: %s (continuing anyway)", err, string(output))
 	} else {
@@ -209,12 +210,16 @@ func (s *NodeService) findNVMeDeviceByNQN(ctx context.Context, nqn string) (stri
 	return s.findNVMeDeviceByNQNFromSys(ctx, nqn)
 }
 
-// runNVMeListSubsys executes nvme list-subsys and returns the output.
-func (s *NodeService) runNVMeListSubsys(ctx context.Context) ([]byte, error) {
+// nvmeListSubsysCmd runs "nvme list-subsys -o json". Tests replace it.
+var nvmeListSubsysCmd = func(ctx context.Context) ([]byte, error) {
 	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	subsysCmd := exec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json")
-	return subsysCmd.CombinedOutput()
+	return cmdexec.CommandContext(listCtx, "nvme", "list-subsys", "-o", "json").CombinedOutput()
+}
+
+// runNVMeListSubsys executes nvme list-subsys and returns the output.
+func (s *NodeService) runNVMeListSubsys(ctx context.Context) ([]byte, error) {
+	return nvmeListSubsysCmd(ctx)
 }
 
 // parseNVMeListSubsysOutputForNQN parses nvme list-subsys JSON output to find device path.
@@ -224,15 +229,15 @@ func (s *NodeService) parseNVMeListSubsysOutputForNQN(output []byte, nqn string)
 	if err != nil || subsystem == nil {
 		return ""
 	}
-	for _, path := range subsystem.Paths {
-		if isNVMeControllerName(path.Name) {
-			devicePath := fmt.Sprintf("/dev/%sn1", path.Name)
-			klog.V(4).Infof("Found NVMe device from list-subsys: %s (controller: %s, NQN: %s)",
-				devicePath, path.Name, nqn)
-			return devicePath
-		}
+	// The subsystem is connected; resolve its namespace device from sysfs rather than
+	// assuming /dev/<controller>n1, which is wrong under native NVMe multipath.
+	devicePath, err := nvmeNamespaceDeviceForNQN(sysBlockPath, nqn)
+	if err != nil {
+		klog.V(4).Infof("Subsystem %s is listed but its namespace device is not resolvable yet: %v", nqn, err)
+		return ""
 	}
-	return ""
+	klog.V(4).Infof("Found NVMe device from list-subsys + sysfs: %s (NQN: %s)", devicePath, nqn)
+	return devicePath
 }
 
 // findNVMeDeviceByNQNFromSys finds NVMe device by checking /sys/class/nvme.
@@ -241,7 +246,7 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 	klog.V(4).Infof("Searching for NVMe device via sysfs: NQN=%s (NSID=1)", nqn)
 
 	// Read /sys/class/nvme/nvmeX/subsysnqn for each device
-	nvmeDir := "/sys/class/nvme"
+	nvmeDir := sysClassNVMePath
 	entries, err := os.ReadDir(nvmeDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to read %s: %w", nvmeDir, err)
@@ -276,10 +281,16 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 			deviceName, deviceNQN, nqn, deviceNQN == nqn)
 
 		if deviceNQN == nqn {
-			// Found the device, construct path with NSID=1 (independent subsystems)
-			devicePath := fmt.Sprintf("/dev/%sn1", deviceName)
+			// Found the controller. Resolve the namespace device by its own subsysnqn, not
+			// as /dev/<controller>n1 (wrong under native NVMe multipath).
+			devicePath := nvmeNamespaceDeviceOrEmpty(nqn)
 			// Check if device exists AND is healthy (non-zero size block device)
-			if _, err := os.Stat(devicePath); err == nil {
+			devicePresent := false
+			if devicePath != "" {
+				_, statErr := os.Stat(devicePath)
+				devicePresent = statErr == nil
+			}
+			if devicePresent {
 				if s.isDeviceHealthy(ctx, devicePath) {
 					klog.V(4).Infof("Found healthy NVMe device from sysfs: %s (controller: %s, NQN: %s)",
 						devicePath, deviceName, nqn)
@@ -292,6 +303,13 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 			klog.V(4).Infof("Found matching NQN on %s but device path %s not ready, trying ns-rescan", deviceName, devicePath)
 			s.forceNamespaceRescan(ctx, controllerPath)
 			// Check again after rescan - device must exist AND be healthy
+			devicePath = nvmeNamespaceDeviceOrEmpty(nqn)
+			if devicePath == "" {
+				// The controller is connected but exposes no namespace even after a rescan:
+				// report it as unhealthy (not "not found") so a stale connection is torn down
+				// right away instead of after a full reconnect-and-wait cycle.
+				return "", fmt.Errorf("%w: no namespace for NQN %s after ns-rescan (controller: %s)", ErrNVMeDeviceUnhealthy, nqn, deviceName)
+			}
 			if _, err := os.Stat(devicePath); err == nil && s.isDeviceHealthy(ctx, devicePath) {
 				klog.V(4).Infof("Found healthy NVMe device after ns-rescan: %s (controller: %s, NQN: %s)",
 					devicePath, deviceName, nqn)
@@ -316,12 +334,17 @@ func (s *NodeService) findNVMeDeviceByNQNFromSys(ctx context.Context, nqn string
 // forceNamespaceRescan forces the kernel to rescan namespaces on an NVMe controller.
 // This is a lightweight version that just does ns-rescan without full udev processing.
 func (s *NodeService) forceNamespaceRescan(ctx context.Context, controllerPath string) {
+	nvmeNSRescanCmd(ctx, controllerPath)
+}
+
+// nvmeNSRescanCmd runs "nvme ns-rescan" on a controller, best effort. Tests replace it.
+var nvmeNSRescanCmd = func(ctx context.Context, controllerPath string) {
 	rescanCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	klog.V(4).Infof("Forcing namespace rescan on controller %s", controllerPath)
 
-	cmd := exec.CommandContext(rescanCtx, "nvme", "ns-rescan", controllerPath)
+	cmd := cmdexec.CommandContext(rescanCtx, "nvme", "ns-rescan", controllerPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		klog.V(4).Infof("nvme ns-rescan failed for %s: %v, output: %s (continuing anyway)", controllerPath, err, string(output))
@@ -344,6 +367,17 @@ func (s *NodeService) waitForNVMeDevice(ctx context.Context, nqn string, timeout
 
 	klog.V(4).Infof("Waiting for NVMe device for NQN %s (timeout: %v)", nqn, timeout)
 
+	// rescanOnCadence rescans a controller the first time it is seen, then every 5th poll.
+	rescanOnCadence := func(controllerName, devicePath string) {
+		if controllerName != lastControllerFound {
+			klog.V(4).Infof("Found controller %s for NQN %s but device %q is not there yet, forcing ns-rescan", controllerName, nqn, devicePath)
+			lastControllerFound = controllerName
+			s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
+		} else if attempt%5 == 0 {
+			s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
+		}
+	}
+
 	for time.Now().Before(deadline) {
 		attempt++
 
@@ -364,24 +398,19 @@ func (s *NodeService) waitForNVMeDevice(ctx context.Context, nqn string, timeout
 				}
 			} else if controllerName != "" {
 				// Device path doesn't exist but we found the controller - try ns-rescan
-				if controllerName != lastControllerFound {
-					klog.V(4).Infof("Found controller %s for NQN %s but device %s doesn't exist, forcing ns-rescan", controllerName, nqn, devicePath)
-					lastControllerFound = controllerName
-					// First time seeing this controller - do immediate rescan
-					s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
-				} else if attempt%5 == 0 {
-					// Periodic rescan every 5 attempts
-					s.forceNamespaceRescan(ctx, "/dev/"+controllerName)
-				}
+				rescanOnCadence(controllerName, devicePath)
 			}
 		case errors.Is(err, ErrNVMeDeviceUnhealthy):
 			// Device found but unhealthy - keep waiting, periodic rescan
 			klog.V(4).Infof("NVMe device found but still initializing (unhealthy), waiting... (attempt %d, path: %s)", attempt, devicePath)
-			if attempt%5 == 0 {
-				if ctrl := extractNVMeController(devicePath); ctrl != "" {
+			if attempt%5 == 0 && devicePath != "" {
+				if ctrl, _, ctrlErr := nvmeControllerForNamespace(sysBlockPath, devicePath); ctrlErr == nil {
 					s.forceNamespaceRescan(ctx, ctrl)
 				}
 			}
+		case controllerName != "":
+			// Controller connected, namespace not visible yet.
+			rescanOnCadence(controllerName, devicePath)
 		default:
 			// Can't find device - do diagnostic dump every 10 attempts
 			if attempt%10 == 0 {
@@ -420,8 +449,14 @@ func (s *NodeService) findNVMeDeviceByNQNWithController(ctx context.Context, nqn
 	// Parse the output to find controller name for this NQN
 	controllerName = s.findControllerForNQN(string(subsysOutput), nqn)
 	if controllerName != "" {
-		devicePath = fmt.Sprintf("/dev/%sn1", controllerName)
-		return devicePath, controllerName, nil
+		// Namespace device from sysfs, not /dev/<controller>n1 (wrong under multipath).
+		if devicePath, err = nvmeNamespaceDeviceForNQN(sysBlockPath, nqn); err == nil {
+			return devicePath, controllerName, nil
+		}
+		// The controller is known; the caller decides when to rescan it. Falling through to
+		// the sysfs scan here would rescan on every poll and drop the controller name.
+		klog.V(4).Infof("Controller %s found for %s but namespace device not resolvable yet: %v", controllerName, nqn, err)
+		return "", controllerName, err
 	}
 
 	// Fall back to sysfs
@@ -450,7 +485,7 @@ func (s *NodeService) logNVMeDiscoveryDiagnostics(ctx context.Context, nqn strin
 	// Run nvme list-subsys
 	subsysCtx, subsysCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer subsysCancel()
-	subsysCmd := exec.CommandContext(subsysCtx, "nvme", "list-subsys")
+	subsysCmd := cmdexec.CommandContext(subsysCtx, "nvme", "list-subsys")
 	if output, err := subsysCmd.CombinedOutput(); err == nil {
 		klog.V(2).Infof("nvme list-subsys output:\n%s", string(output))
 	} else {
@@ -460,7 +495,7 @@ func (s *NodeService) logNVMeDiscoveryDiagnostics(ctx context.Context, nqn strin
 	// Run nvme list to show actual namespace devices
 	listCtx, listCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer listCancel()
-	listCmd := exec.CommandContext(listCtx, "nvme", "list")
+	listCmd := cmdexec.CommandContext(listCtx, "nvme", "list")
 	if output, err := listCmd.CombinedOutput(); err == nil {
 		klog.V(2).Infof("nvme list output:\n%s", string(output))
 	} else {
@@ -494,12 +529,10 @@ func (s *NodeService) logNVMeDiscoveryDiagnostics(ctx context.Context, nqn strin
 		}
 	}
 
-	// List /dev/nvme* devices
-	devCtx, devCancel := context.WithTimeout(ctx, 3*time.Second)
-	defer devCancel()
-	devCmd := exec.CommandContext(devCtx, "ls", "-la", "/dev/nvme*")
-	if output, err := devCmd.CombinedOutput(); err == nil {
-		klog.V(2).Infof("/dev/nvme* devices:\n%s", string(output))
+	// List /dev/nvme* devices. (This used to exec "ls /dev/nvme*" without a shell, so the
+	// glob was never expanded and the diagnostic always failed.)
+	if devices, err := filepath.Glob("/dev/nvme*"); err == nil {
+		klog.V(2).Infof("/dev/nvme* devices: %v", devices)
 	}
 
 	klog.V(2).Infof("=== End NVMe Diagnostics ===")
@@ -511,7 +544,7 @@ func (s *NodeService) isDeviceHealthy(ctx context.Context, devicePath string) bo
 	sizeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
+	cmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false

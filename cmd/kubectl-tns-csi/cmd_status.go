@@ -161,26 +161,23 @@ func checkNFSStatus(ctx context.Context, client tnsapi.ClientInterface, _ *tnsap
 		return errNFSShareIDNotFound
 	}
 
-	// Query NFS shares to verify share exists and is enabled
-	shares, err := client.QueryAllNFSShares(ctx, "")
+	// Look the share up by ID to verify it exists and is enabled
+	share, err := client.QueryNFSShareByID(ctx, status.NFSShareID)
 	if err != nil {
-		return fmt.Errorf("failed to query NFS shares: %w", err)
+		return fmt.Errorf("failed to query NFS share %d: %w", status.NFSShareID, err)
+	}
+	if share == nil {
+		return fmt.Errorf("%w: %d", errNFSShareNotFound, status.NFSShareID)
 	}
 
-	for _, share := range shares {
-		if share.ID == status.NFSShareID {
-			status.NFSEnabled = share.Enabled
-			if status.NFSSharePath == "" {
-				status.NFSSharePath = share.Path
-			}
-			if !share.Enabled {
-				return fmt.Errorf("%w: %d", errNFSShareDisabled, share.ID)
-			}
-			return nil
-		}
+	status.NFSEnabled = share.Enabled
+	if status.NFSSharePath == "" {
+		status.NFSSharePath = share.Path
 	}
-
-	return fmt.Errorf("%w: %d", errNFSShareNotFound, status.NFSShareID)
+	if !share.Enabled {
+		return fmt.Errorf("%w: %d", errNFSShareDisabled, share.ID)
+	}
+	return nil
 }
 
 func checkNVMeOFStatus(ctx context.Context, client tnsapi.ClientInterface, _ *tnsapi.DatasetWithProperties, props map[string]tnsapi.UserProperty, status *VolumeStatus) error {
@@ -197,7 +194,7 @@ func checkNVMeOFStatus(ctx context.Context, client tnsapi.ClientInterface, _ *tn
 
 	// Verify subsystem exists
 	if status.NVMeSubsystemID > 0 {
-		subsystems, err := client.ListAllNVMeOFSubsystems(ctx)
+		subsystems, err := client.QueryNVMeOFSubsystems(ctx, []interface{}{[]interface{}{"id", "=", status.NVMeSubsystemID}})
 		if err != nil {
 			return fmt.Errorf("failed to query NVMe-oF subsystems: %w", err)
 		}
@@ -219,19 +216,11 @@ func checkNVMeOFStatus(ctx context.Context, client tnsapi.ClientInterface, _ *tn
 
 	// Verify namespace exists
 	if status.NVMeNamespaceID > 0 {
-		namespaces, err := client.QueryAllNVMeOFNamespaces(ctx)
+		ns, err := client.QueryNVMeOFNamespaceByID(ctx, status.NVMeNamespaceID)
 		if err != nil {
-			return fmt.Errorf("failed to query NVMe-oF namespaces: %w", err)
+			return fmt.Errorf("failed to query NVMe-oF namespace %d: %w", status.NVMeNamespaceID, err)
 		}
-
-		found := false
-		for _, ns := range namespaces {
-			if ns.ID == status.NVMeNamespaceID {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if ns == nil {
 			return fmt.Errorf("%w: %d", errNVMeNamespaceNotFound, status.NVMeNamespaceID)
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -72,10 +71,7 @@ func (s *NodeService) stageNFSVolume(ctx context.Context, req *csi.NodeStageVolu
 	args := []string{"-t", ProtocolNFS, "-o", mount.JoinMountOptions(mountOptions), nfsSource, stagingTargetPath}
 
 	klog.V(4).Infof("Executing mount command for staging: mount %v", args)
-	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runMount(ctx, 30*time.Second, args...)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to mount NFS share for staging: %v, output: %s", err, string(output))
 	}
@@ -116,11 +112,8 @@ func (s *NodeService) unstageNFSVolume(ctx context.Context, req *csi.NodeUnstage
 		klog.V(4).Infof("Staging path %s is not mounted, skipping unmount", stagingTargetPath)
 	}
 
-	// Remove the staging directory (best effort).
-	// Use RemoveAll because NFS may leave behind .nfs* silly-rename files
-	// for files that were open at unmount time.
-	if err := os.RemoveAll(stagingTargetPath); err != nil {
-		klog.Warningf("Failed to remove staging target path %s: %v", stagingTargetPath, err)
+	if err := removeEmptyStagingDir(stagingTargetPath); err != nil {
+		return nil, err
 	}
 
 	klog.V(4).Infof("Unstaged NFS volume %s from %s", volumeID, stagingTargetPath)
@@ -170,10 +163,7 @@ func (s *NodeService) publishNFSVolume(ctx context.Context, req *csi.NodePublish
 	args := []string{"-o", mount.JoinMountOptions(mountOptions), stagingTargetPath, targetPath}
 
 	klog.V(4).Infof("Executing bind mount command: mount %v", args)
-	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runMount(ctx, 30*time.Second, args...)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to bind mount NFS volume: %v, output: %s", err, string(output))
 	}

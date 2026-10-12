@@ -1,9 +1,19 @@
-.PHONY: all build build-plugin clean test docker-build docker-push lint lint-fix test-coverage test-e2e test-e2e-nfs test-e2e-nvmeof test-e2e-iscsi test-e2e-smb test-e2e-scale test-e2e-snapclone changelog
+.PHONY: all build build-plugin clean deps install test test-unit test-scripts test-sanity test-all \
+	test-coverage coverage coverage-check \
+	docker-build docker-push lint lint-fix lint-verbose nolint-budget nolint-budget-update \
+	mod-tidy-check vulncheck check \
+	test-e2e test-e2e-nfs test-e2e-nvmeof test-e2e-iscsi test-e2e-smb test-e2e-scale test-e2e-snapclone \
+	changelog changelog-unreleased
 
 DRIVER_NAME=tns-csi-driver
 PLUGIN_NAME=kubectl-tns_csi
 IMAGE_NAME=bfenski/tns-csi
 REGISTRY?=docker.io
+
+# Single source of truth for the golangci-lint version. CI workflows read this line
+# (see .github/workflows/ci.yml and release.yml); keep .pre-commit-config.yaml in sync.
+# Bump deliberately and fix any new warnings in the same PR.
+GOLANGCI_LINT_VERSION ?= v2.14.0
 
 # Version information - derived from git tags
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
@@ -51,7 +61,9 @@ test:
 	$(GOTEST) -v ./...
 
 lint:
-	@echo "Running golangci-lint..."
+	@echo "Running golangci-lint (CI pins $(GOLANGCI_LINT_VERSION))..."
+	@$(GOLANGCI_LINT) version 2>/dev/null | grep -q "$(GOLANGCI_LINT_VERSION:v%=%)" || \
+		echo "warning: local golangci-lint is not $(GOLANGCI_LINT_VERSION); results may differ from CI"
 	$(GOLANGCI_LINT) run --config .golangci.yml ./...
 
 lint-fix:
@@ -61,6 +73,15 @@ lint-fix:
 lint-verbose:
 	@echo "Running golangci-lint (verbose)..."
 	$(GOLANGCI_LINT) run --config .golangci.yml -v ./...
+
+# Ratchet on //nolint directives (see nolint-budget.txt). After removing directives,
+# run `make nolint-budget-update` and commit the lowered budget.
+nolint-budget:
+	bash scripts/ci/nolint-budget_test.sh >/dev/null
+	bash scripts/ci/nolint-budget.sh
+
+nolint-budget-update:
+	bash scripts/ci/nolint-budget.sh --update
 
 deps:
 	@echo "Downloading dependencies..."
@@ -90,16 +111,58 @@ test-sanity:
 	@echo "Running CSI sanity tests..."
 	./tests/sanity/test-sanity.sh
 
+# Unit tests: race detector on, randomized order, driver + CLI packages (what CI runs).
 test-unit:
 	@echo "Running unit tests..."
-	$(GOTEST) -v -short ./pkg/...
+	$(GOTEST) -v -short -race -shuffle=on ./pkg/... ./cmd/...
 
-test-coverage:
-	@echo "Running tests with coverage (for SonarQube)..."
-	$(GOTEST) -v -short -coverprofile=coverage.out -covermode=atomic ./pkg/...
-	$(GOTEST) -v -short -json ./pkg/... > test-report.json || true
+# Shell-script unit tests (test runners live in tests/sanity).
+test-scripts:
+	@echo "Running script tests..."
+	bash tests/sanity/sanity-script_test.sh
+
+# Fail if go.mod/go.sum are not tidy. Read-only: prints the needed diff, never edits files.
+mod-tidy-check:
+	@echo "Checking go.mod/go.sum are tidy..."
+	@$(GOMOD) tidy -diff || (echo "go.mod/go.sum not tidy: run 'go mod tidy'" && exit 1)
+
+# Known-vulnerability scan of reachable code (needs network for the vuln DB; not part of check).
+GOVULNCHECK_VERSION ?= v1.9.0
+vulncheck:
+	@echo "Running govulncheck $(GOVULNCHECK_VERSION)..."
+	$(GOCMD) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+# Everything a PR must pass. CI runs the same checks (lint via golangci-lint-action).
+check: build lint mod-tidy-check test-unit test-scripts test-sanity
+	@echo "All checks passed"
+
+# Coverage profile for the driver and CLI packages (consumed by coverage-check and SonarQube).
+coverage:
+	@echo "Running tests with coverage..."
+	$(GOTEST) -short -coverprofile=coverage.out -covermode=atomic ./pkg/... ./cmd/...
 	@echo "Coverage report: coverage.out"
+
+# Coverage + JSON test report for SonarQube.
+test-coverage: coverage
+	$(GOTEST) -v -short -json ./pkg/... > test-report.json || true
 	@echo "Test report: test-report.json"
+
+# Coverage ratchet: enforce the floors in .testcoverage.yml.
+# COVERAGE_BREAKDOWN=<file>       also write a breakdown (CI uploads it from main).
+# COVERAGE_BASE_BREAKDOWN=<file>  also fail if total coverage drops below that breakdown.
+GO_TEST_COVERAGE_VERSION ?= v2.20.0
+# go-test-coverage v2.20+ needs Go 1.27; only the tool runs on this toolchain (fetched on
+# demand), the tests that produce coverage.out still use the repo's Go version.
+GO_TEST_COVERAGE_TOOLCHAIN ?= go1.27.2
+COVERAGE_BREAKDOWN ?=
+COVERAGE_BASE_BREAKDOWN ?=
+# Allowed drop in total coverage vs the base, in percentage points. A small tolerance absorbs
+# run-to-run noise from timing-dependent paths; floors still catch real erosion.
+COVERAGE_DIFF_THRESHOLD ?= -0.5
+coverage-check: coverage
+	GOTOOLCHAIN=$(GO_TEST_COVERAGE_TOOLCHAIN) $(GOCMD) run github.com/vladopajic/go-test-coverage/v2@$(GO_TEST_COVERAGE_VERSION) --config=.testcoverage.yml \
+		$(if $(COVERAGE_BREAKDOWN),--breakdown-file-name=$(COVERAGE_BREAKDOWN)) \
+		$(if $(COVERAGE_BASE_BREAKDOWN),--diff-base-breakdown-file-name=$(COVERAGE_BASE_BREAKDOWN) --diff-threshold=$(COVERAGE_DIFF_THRESHOLD))
 
 test-all: test-unit test-sanity
 	@echo "All tests completed"

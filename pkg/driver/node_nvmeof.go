@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/metrics"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
@@ -179,7 +179,7 @@ func (s *NodeService) verifyDeviceHealthy(ctx context.Context, devicePath string
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		sizeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		cmd := exec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
+		cmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
 		output, err := cmd.CombinedOutput()
 		cancel()
 
@@ -463,21 +463,11 @@ func (s *NodeService) deriveNQNFromStagingPath(ctx context.Context, stagingTarge
 		return "", err
 	}
 
-	controllerName, err := getNVMeControllerFromDevicePath(devicePath)
+	// The device's own owner (controller or multipath subsystem) carries its NQN; a
+	// controller name derived from the device name is wrong under native multipath.
+	nqn, err := nvmeNQNForDevice(sysBlockPath, devicePath)
 	if err != nil {
 		return "", err
-	}
-
-	nqnPath := "/sys/class/nvme/" + controllerName + "/subsysnqn"
-	//nolint:gosec // sysfs read from fixed kernel path
-	data, err := os.ReadFile(nqnPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read NQN from %s: %w", nqnPath, err)
-	}
-
-	nqn := strings.TrimSpace(string(data))
-	if nqn == "" {
-		return "", fmt.Errorf("%s: %w", nqnPath, ErrNVMeEmptyNQN)
 	}
 	return nqn, nil
 }
@@ -521,17 +511,14 @@ func removeNVMeStagingNQN(stagingTargetPath string) error {
 
 // getStagedNVMeDevicePath resolves the NVMe device backing a staging path.
 func (s *NodeService) getStagedNVMeDevicePath(ctx context.Context, stagingTargetPath string) (string, error) {
-	// Filesystem mode: mounted path, source comes from findmnt.
-	if mounted, err := mount.IsMounted(ctx, stagingTargetPath); err == nil && mounted {
-		cmd := exec.CommandContext(ctx, "findmnt", "-n", "-o", "SOURCE", stagingTargetPath)
-		output, cmdErr := cmd.CombinedOutput()
-		if cmdErr != nil {
-			return "", fmt.Errorf("findmnt source lookup failed for %s: %w", stagingTargetPath, cmdErr)
-		}
-		source := strings.TrimSpace(string(output))
-		if source != "" && strings.HasPrefix(filepath.Base(source), "nvme") {
-			return source, nil
-		}
+	// Filesystem mode: the device mounted at the staging path, from the mount table.
+	entry, mounted, err := lookupMountedEntry(ctx, stagingTargetPath)
+	if err != nil {
+		// Fail closed: guessing a device here could disconnect another volume.
+		return "", fmt.Errorf("mount table lookup failed for %s: %w", stagingTargetPath, err)
+	}
+	if mounted && strings.HasPrefix(filepath.Base(entry.Source), "nvme") {
+		return entry.Source, nil
 	}
 
 	// Block mode: staging path is a symlink to /dev/nvmeXnY.
@@ -543,22 +530,6 @@ func (s *NodeService) getStagedNVMeDevicePath(ctx context.Context, stagingTarget
 		return "", fmt.Errorf("staging path %s resolved to %s: %w", stagingTargetPath, resolved, ErrNVMeNonNVMeStagingDevice)
 	}
 	return resolved, nil
-}
-
-// getNVMeControllerFromDevicePath extracts controller name (e.g. nvme0) from device path.
-func getNVMeControllerFromDevicePath(devicePath string) (string, error) {
-	base := filepath.Base(devicePath)
-	if !strings.HasPrefix(base, "nvme") {
-		return "", fmt.Errorf("%s: %w", devicePath, ErrNVMeNotNVMeDevice)
-	}
-
-	// Namespace node: nvme0n1 -> nvme0
-	if idx := strings.Index(base[4:], "n"); idx >= 0 {
-		return base[:4+idx], nil
-	}
-
-	// Controller node: nvme0
-	return base, nil
 }
 
 // formatAndMountNVMeDevice formats (if needed) and mounts an NVMe device.
@@ -639,11 +610,7 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 		args = []string{"-o", mount.JoinMountOptions(mountOptions), devicePath, stagingTargetPath}
 	}
 
-	mountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(mountCtx, "mount", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runMount(ctx, 30*time.Second, args...)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to mount device: %v, output: %s", err, string(output))
 	}

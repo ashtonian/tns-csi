@@ -66,6 +66,12 @@ jobs:
           if grep -q '^  namespace: \(ignored\|kube-system\)$' /tmp/tns-csi-rendered.yaml; then
             exit 1
           fi
+          # The API key must reach the driver via env, never as a flag (flags are visible in ps).
+          if grep -q -- '--api-key' /tmp/tns-csi-rendered.yaml; then
+            echo "API key must not be passed on the command line"
+            exit 1
+          fi
+          test "$(grep -c 'name: TNS_API_KEY' /tmp/tns-csi-rendered.yaml)" -eq 2
 
           helm template expansion-false charts/tns-csi-driver \
             --show-only templates/storageclass.yaml \
@@ -115,13 +121,41 @@ jobs:
             exit 1
           fi
 
+      - name: Read pinned golangci-lint version
+        id: lintver
+        # Single source of truth is GOLANGCI_LINT_VERSION in the Makefile.
+        # Fail loudly if the line is not found: an empty version makes the action use "latest".
+        run: |
+          v=$(sed -n 's/^GOLANGCI_LINT_VERSION *?= *//p' Makefile)
+          test -n "$v" || { echo "GOLANGCI_LINT_VERSION not found in Makefile"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          # Pinned to avoid CI churn when upstream bumps default rule strictness.
-          # Bump deliberately and fix any new warnings in the same PR.
-          version: v2.14.0
+          version: ${{ steps.lintver.outputs.version }}
           args: --config .golangci.yml
+
+      - name: nolint budget
+        run: make nolint-budget
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Scan with the Go version that builds the shipped image (Dockerfile builder),
+          # not go.mod's minimum language version: stdlib advisories depend on it.
+          go-version: '1.27.2'
+
+      # Plain `go run` with a pinned version instead of a third-party action, so the
+      # job works under any repository Actions allowlist.
+      - name: Run govulncheck
+        run: make vulncheck
 
   test:
     name: Unit Tests
@@ -137,11 +171,57 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Check go.mod/go.sum are tidy
+        run: make mod-tidy-check
+
       - name: Run tests
         run: make test-unit
 
       - name: Build
         run: make build
+
+  coverage:
+    name: Coverage Ratchet
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # download the main-branch breakdown artifact
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # PRs compare against the breakdown uploaded by the latest successful CI run on main.
+      # Floors in .testcoverage.yml are enforced either way; only the no-decrease diff
+      # is skipped when no main breakdown exists yet (e.g. the first run after this lands).
+      - name: Fetch main coverage breakdown
+        id: base
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          run_id=$(gh run list -R "$REPO" --workflow ci.yml --branch main --event push \
+            --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$run_id" ] && gh run download "$run_id" -R "$REPO" -n coverage-breakdown -D .coverage-base; then
+            echo "file=.coverage-base/coverage.breakdown" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No coverage breakdown from main found; skipping the no-decrease check (floors still enforced)."
+          fi
+
+      - name: Coverage gate
+        run: make coverage-check COVERAGE_BREAKDOWN=coverage.breakdown COVERAGE_BASE_BREAKDOWN="${{ steps.base.outputs.file }}"
+
+      - name: Upload coverage breakdown (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-breakdown
+          path: coverage.breakdown
+          retention-days: 90
 
   build-and-push:
     name: Build and Push Image

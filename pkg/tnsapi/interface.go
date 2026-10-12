@@ -41,6 +41,7 @@ type ClientInterface interface {
 	QueryNFSShare(ctx context.Context, path string) ([]NFSShare, error)
 	QueryNFSShareByID(ctx context.Context, shareID int) (*NFSShare, error)
 	QueryAllNFSShares(ctx context.Context, pathPrefix string) ([]NFSShare, error)
+	QueryNFSShares(ctx context.Context, filters []interface{}) ([]NFSShare, error)
 
 	// SMB share operations
 	CreateSMBShare(ctx context.Context, params SMBShareCreateParams) (*SMBShare, error)
@@ -49,6 +50,7 @@ type ClientInterface interface {
 	QuerySMBShare(ctx context.Context, path string) ([]SMBShare, error)
 	QuerySMBShareByID(ctx context.Context, shareID int) (*SMBShare, error)
 	QueryAllSMBShares(ctx context.Context, pathPrefix string) ([]SMBShare, error)
+	QuerySMBShares(ctx context.Context, filters []interface{}) ([]SMBShare, error)
 
 	// Filesystem operations
 	FilesystemStat(ctx context.Context, path string) error
@@ -64,11 +66,13 @@ type ClientInterface interface {
 	NVMeOFSubsystemByNQN(ctx context.Context, nqn string) (*NVMeOFSubsystem, error)
 	QueryNVMeOFSubsystem(ctx context.Context, nqn string) ([]NVMeOFSubsystem, error)
 	ListAllNVMeOFSubsystems(ctx context.Context) ([]NVMeOFSubsystem, error)
+	QueryNVMeOFSubsystems(ctx context.Context, filters []interface{}) ([]NVMeOFSubsystem, error)
 
 	CreateNVMeOFNamespace(ctx context.Context, params NVMeOFNamespaceCreateParams) (*NVMeOFNamespace, error)
 	DeleteNVMeOFNamespace(ctx context.Context, namespaceID int) error
 	QueryNVMeOFNamespaceByID(ctx context.Context, namespaceID int) (*NVMeOFNamespace, error)
 	QueryAllNVMeOFNamespaces(ctx context.Context) ([]NVMeOFNamespace, error)
+	QueryNVMeOFNamespaces(ctx context.Context, filters []interface{}) ([]NVMeOFNamespace, error)
 
 	AddSubsystemToPort(ctx context.Context, subsystemID, portID int) error
 	RemoveSubsystemFromPort(ctx context.Context, portSubsysID int) error

@@ -16,8 +16,9 @@ type healthResourceMaps struct {
 	iscsiTargetMap map[string]*tnsapi.ISCSITarget
 }
 
-// buildHealthResourceMaps queries all protocol resources in bulk for health checking.
-func buildHealthResourceMaps(ctx context.Context, client tnsapi.ClientInterface) *healthResourceMaps {
+// buildHealthResourceMaps loads, in one request per protocol, the resources of the
+// protocols that have managed volumes; protocols with no volumes are not queried.
+func buildHealthResourceMaps(ctx context.Context, client tnsapi.ClientInterface, protocols map[string]bool) *healthResourceMaps {
 	m := &healthResourceMaps{
 		nfsShareMap:    make(map[string]*tnsapi.NFSShare),
 		nvmeSubsysMap:  make(map[string]*tnsapi.NVMeOFSubsystem),
@@ -25,32 +26,36 @@ func buildHealthResourceMaps(ctx context.Context, client tnsapi.ClientInterface)
 		iscsiTargetMap: make(map[string]*tnsapi.ISCSITarget),
 	}
 
-	nfsShares, err := client.QueryAllNFSShares(ctx, "")
-	if err == nil {
-		for i := range nfsShares {
-			m.nfsShareMap[nfsShares[i].Path] = &nfsShares[i]
+	if protocols[protocolNFS] {
+		if nfsShares, err := client.QueryAllNFSShares(ctx, ""); err == nil {
+			for i := range nfsShares {
+				m.nfsShareMap[nfsShares[i].Path] = &nfsShares[i]
+			}
 		}
 	}
 
-	nvmeSubsystems, err := client.ListAllNVMeOFSubsystems(ctx)
-	if err == nil {
-		for i := range nvmeSubsystems {
-			m.nvmeSubsysMap[nvmeSubsystems[i].Name] = &nvmeSubsystems[i]
-			m.nvmeSubsysMap[nvmeSubsystems[i].NQN] = &nvmeSubsystems[i]
+	if protocols[protocolNVMeOF] {
+		if nvmeSubsystems, err := client.ListAllNVMeOFSubsystems(ctx); err == nil {
+			for i := range nvmeSubsystems {
+				m.nvmeSubsysMap[nvmeSubsystems[i].Name] = &nvmeSubsystems[i]
+				m.nvmeSubsysMap[nvmeSubsystems[i].NQN] = &nvmeSubsystems[i]
+			}
 		}
 	}
 
-	smbShares, err := client.QueryAllSMBShares(ctx, "")
-	if err == nil {
-		for i := range smbShares {
-			m.smbShareMap[smbShares[i].Path] = &smbShares[i]
+	if protocols[protocolSMB] {
+		if smbShares, err := client.QueryAllSMBShares(ctx, ""); err == nil {
+			for i := range smbShares {
+				m.smbShareMap[smbShares[i].Path] = &smbShares[i]
+			}
 		}
 	}
 
-	iscsiTargets, err := client.QueryISCSITargets(ctx, nil)
-	if err == nil {
-		for i := range iscsiTargets {
-			m.iscsiTargetMap[iscsiTargets[i].Name] = &iscsiTargets[i]
+	if protocols[protocolISCSI] {
+		if iscsiTargets, err := client.QueryISCSITargets(ctx, nil); err == nil {
+			for i := range iscsiTargets {
+				m.iscsiTargetMap[iscsiTargets[i].Name] = &iscsiTargets[i]
+			}
 		}
 	}
 
@@ -64,7 +69,13 @@ func CheckVolumeHealth(ctx context.Context, client tnsapi.ClientInterface) (*Hea
 		return nil, err
 	}
 
-	resources := buildHealthResourceMaps(ctx, client)
+	protocols := make(map[string]bool)
+	for i := range datasets {
+		if prop, ok := datasets[i].UserProperties[tnsapi.PropertyProtocol]; ok {
+			protocols[prop.Value] = true
+		}
+	}
+	resources := buildHealthResourceMaps(ctx, client, protocols)
 
 	report := &HealthReport{
 		Volumes:  make([]VolumeHealth, 0),

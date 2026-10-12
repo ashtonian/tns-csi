@@ -6,18 +6,26 @@ import (
 	"github.com/fenio/tns-csi/pkg/tnsapi"
 )
 
-// queryExactDataset filters a prefix listing by dataset ID before callers use it
-// for volume identity or existence. Prefix siblings and child datasets must never
-// be adopted as the requested volume, regardless of the order returned by TrueNAS.
+// TrueNAS query-filter field names used by the driver's specific lookups.
+const (
+	queryFieldPath = "path" // sharing.nfs.query / sharing.smb.query share path
+	queryFieldDisk = "disk" // iscsi.extent.query backing device ("zvol/<dataset>")
+)
+
+// queryExactDataset looks up one dataset by exact ID and returns it as a one-element
+// slice, or an empty slice when it does not exist. It used to filter an "id starts with"
+// listing, which returned the dataset's whole subtree. The ID is still re-checked so
+// prefix siblings and child datasets are never adopted as the requested volume.
 func (s *ControllerService) queryExactDataset(ctx context.Context, datasetID string) ([]tnsapi.Dataset, error) {
-	datasets, err := s.apiClient.QueryAllDatasets(ctx, datasetID)
+	dataset, err := s.apiClient.Dataset(ctx, datasetID)
+	if tnsapi.IsNotFound(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	for _, dataset := range datasets {
-		if dataset.ID == datasetID {
-			return []tnsapi.Dataset{dataset}, nil
-		}
+	if dataset == nil || dataset.ID != datasetID {
+		return nil, nil
 	}
-	return nil, nil
+	return []tnsapi.Dataset{*dataset}, nil
 }

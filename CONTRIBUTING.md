@@ -39,7 +39,7 @@ Enhancement suggestions are welcome! Please:
 2. **Follow the coding standards** (see below)
 3. **Add tests** for your changes when applicable
 4. **Update documentation** if needed
-5. **Ensure tests pass** - Run `make test` and `make lint`
+5. **Ensure checks pass** - Run `make check` (what CI runs)
 6. **Write clear commit messages** (see commit guidelines below)
 7. **Submit a pull request** with a clear description
 
@@ -47,7 +47,7 @@ Enhancement suggestions are welcome! Please:
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go (the version pinned in `go.mod`; `actions/setup-go` and `make` both read it)
 - Docker (for building images)
 - Kubernetes cluster (Kind, k3s, or full cluster)
 - golangci-lint for code linting
@@ -81,7 +81,7 @@ See [docs/KIND.md](docs/KIND.md) for instructions on setting up a local developm
 ### Go Code Style
 
 - Follow standard Go conventions and idioms
-- Use `gofmt` for formatting (integrated in `make lint-fix`)
+- Formatting is enforced by `goimports` through golangci-lint (`make lint-fix` applies it)
 - Run `golangci-lint` before committing
 - Keep functions small and focused
 - Write clear, descriptive variable names
@@ -137,7 +137,7 @@ go test -cover ./...
 
 ### Ginkgo E2E Tests
 
-Integration tests use [Ginkgo](https://onsi.github.io/ginkgo/) and run automatically in CI. The main `integration.yml` workflow runs on GitHub-hosted `ubuntu-24.04` runners (k3s in a QEMU VM via `.github/actions/qemu-vm`). Auxiliary workflows (encryption, scale, stress, distro-compatibility) are currently disabled — see [`.github/workflows/README.md`](.github/workflows/README.md). To run locally:
+Integration tests use [Ginkgo](https://onsi.github.io/ginkgo/) and run automatically in CI. The main `integration.yml` workflow runs on GitHub-hosted `ubuntu-26.04` runners (k3s in a QEMU VM via `.github/actions/qemu-vm`). It runs after CI on `main` and on manual dispatch (pass the PR number as the `pr` input to test a branch); see [`.github/workflows/README.md`](.github/workflows/README.md). To run locally:
 
 ```bash
 # Install Ginkgo CLI
@@ -162,6 +162,19 @@ ginkgo -v --focus="expand" ./tests/e2e/nfs/...
 ```
 
 See [tests/e2e/README.md](tests/e2e/README.md) for detailed E2E test documentation.
+
+### Coverage ratchet
+
+CI enforces test coverage with [go-test-coverage](https://github.com/vladopajic/go-test-coverage), configured in `.testcoverage.yml`:
+
+- **Floors:** total and per-package minimums. They only move up.
+- **No decrease:** a PR may not lower total coverage relative to the latest `main` build.
+
+Run it locally with `make coverage-check`. When your change raises a package's coverage, raise its floor in `.testcoverage.yml` to the new value minus one point in the same PR. Never lower a floor; add tests instead.
+
+### `//nolint` budget
+
+`nolint-budget.txt` records how many `//nolint` directives each linter has under `pkg/` and `cmd/`. CI (`make nolint-budget`) fails if a count grows or a new linter is suppressed. Fix the code instead. It also fails if a count shrinks without the budget being lowered. When you remove directives, run `make nolint-budget-update` and commit the new budget so it cannot creep back.
 
 ### Linting
 

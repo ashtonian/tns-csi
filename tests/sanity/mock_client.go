@@ -236,12 +236,13 @@ func (m *MockClient) CreateDataset(ctx context.Context, params tnsapi.DatasetCre
 	m.nextDatasetID++
 
 	m.datasets[params.Name] = mockDataset{
-		ID:         params.Name,
-		Name:       params.Name,
-		Type:       params.Type,
-		Used:       map[string]any{parsedKey: float64(0)},
-		Available:  map[string]any{parsedKey: float64(107374182400)}, // 100GB
-		Mountpoint: "/mnt/" + params.Name,
+		ID:             params.Name,
+		Name:           params.Name,
+		Type:           params.Type,
+		Used:           map[string]any{parsedKey: float64(0)},
+		Available:      map[string]any{parsedKey: float64(107374182400)}, // 100GB
+		Mountpoint:     "/mnt/" + params.Name,
+		UserProperties: userPropertyMap(params.UserProperties),
 	}
 
 	return &tnsapi.Dataset{
@@ -788,10 +789,11 @@ func (m *MockClient) CreateZvol(ctx context.Context, params tnsapi.ZvolCreatePar
 	m.nextDatasetID++
 
 	m.datasets[params.Name] = mockDataset{
-		ID:      params.Name,
-		Name:    params.Name,
-		Type:    "VOLUME",
-		Volsize: params.Volsize,
+		ID:             params.Name,
+		Name:           params.Name,
+		Type:           "VOLUME",
+		Volsize:        params.Volsize,
+		UserProperties: userPropertyMap(params.UserProperties),
 	}
 
 	return &tnsapi.Dataset{
@@ -1171,13 +1173,18 @@ func (m *MockClient) CloneSnapshot(ctx context.Context, params tnsapi.CloneSnaps
 	// Create cloned dataset - use name as ID, matching real TrueNAS API behavior
 	m.nextDatasetID++
 
+	cloneProps := make(map[string]string, len(params.DatasetProperties))
+	for k, v := range params.DatasetProperties {
+		cloneProps[k] = v
+	}
 	m.datasets[params.Dataset] = mockDataset{
-		ID:         params.Dataset,
-		Name:       params.Dataset,
-		Type:       datasetTypeFilesystem,
-		Used:       map[string]any{parsedKey: float64(0)},
-		Available:  map[string]any{parsedKey: float64(107374182400)},
-		Mountpoint: "/mnt/" + params.Dataset,
+		ID:             params.Dataset,
+		Name:           params.Dataset,
+		Type:           datasetTypeFilesystem,
+		Used:           map[string]any{parsedKey: float64(0)},
+		Available:      map[string]any{parsedKey: float64(107374182400)},
+		Mountpoint:     "/mnt/" + params.Dataset,
+		UserProperties: cloneProps,
 	}
 
 	return &tnsapi.Dataset{
@@ -1848,3 +1855,34 @@ func (m *MockClient) Close() {
 
 // Verify that MockClient implements ClientInterface at compile time.
 var _ tnsapi.ClientInterface = (*MockClient)(nil)
+
+// QueryNFSShares ignores the filters and returns every share; callers re-check matches
+// client-side, so the unfiltered superset is still a correct answer.
+func (m *MockClient) QueryNFSShares(ctx context.Context, _ []interface{}) ([]tnsapi.NFSShare, error) {
+	return m.QueryAllNFSShares(ctx, "")
+}
+
+// QuerySMBShares ignores the filters (see QueryNFSShares).
+func (m *MockClient) QuerySMBShares(ctx context.Context, _ []interface{}) ([]tnsapi.SMBShare, error) {
+	return m.QueryAllSMBShares(ctx, "")
+}
+
+// QueryNVMeOFNamespaces ignores the filters (see QueryNFSShares).
+func (m *MockClient) QueryNVMeOFNamespaces(ctx context.Context, _ []interface{}) ([]tnsapi.NVMeOFNamespace, error) {
+	return m.QueryAllNVMeOFNamespaces(ctx)
+}
+
+// QueryNVMeOFSubsystems ignores the filters (see QueryNFSShares).
+func (m *MockClient) QueryNVMeOFSubsystems(ctx context.Context, _ []interface{}) ([]tnsapi.NVMeOFSubsystem, error) {
+	return m.ListAllNVMeOFSubsystems(ctx)
+}
+
+// userPropertyMap converts create-time user_properties into the mock's property map.
+// It always returns a non-nil map so later SetDatasetProperties calls can merge into it.
+func userPropertyMap(kvs []tnsapi.UserPropertyKV) map[string]string {
+	m := make(map[string]string, len(kvs))
+	for _, kv := range kvs {
+		m[kv.Key] = kv.Value
+	}
+	return m
+}

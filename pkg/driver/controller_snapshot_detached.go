@@ -50,7 +50,7 @@ func (s *ControllerService) createDetachedSnapshot(ctx context.Context, timer *m
 		snapshotName, sourceVolumeID, sourceDataset, targetDataset, protocol)
 
 	// Check if detached snapshot already exists (idempotency)
-	existingDatasets, err := s.apiClient.QueryAllDatasets(ctx, targetDataset)
+	existingDatasets, err := s.queryExactDataset(ctx, targetDataset)
 	if err != nil {
 		klog.Warningf("Failed to query existing datasets: %v", err)
 	}
@@ -230,7 +230,7 @@ func (s *ControllerService) ensureDetachedSnapshotsParentDataset(ctx context.Con
 	klog.V(4).Infof("Ensuring detached snapshots parent dataset exists: %s", parentDataset)
 
 	// Check if the dataset already exists
-	datasets, err := s.apiClient.QueryAllDatasets(ctx, parentDataset)
+	datasets, err := s.queryExactDataset(ctx, parentDataset)
 	if err != nil {
 		return fmt.Errorf("failed to query dataset %s: %w", parentDataset, err)
 	}
@@ -302,7 +302,7 @@ func (s *ControllerService) deleteDetachedSnapshot(ctx context.Context, timer *m
 	props, err := s.apiClient.GetDatasetProperties(ctx, datasetPath, []string{tnsapi.PropertyDetachedSnapshot, tnsapi.PropertyManagedBy})
 	if err != nil {
 		// If dataset doesn't exist, consider deletion successful (idempotent)
-		if isNotFoundError(err) {
+		if tnsapi.IsNotFound(err) {
 			klog.Infof("Detached snapshot dataset %s not found, assuming already deleted", datasetPath)
 			timer.ObserveSuccess()
 			return &csi.DeleteSnapshotResponse{}, nil
@@ -329,7 +329,7 @@ func (s *ControllerService) deleteDetachedSnapshot(ctx context.Context, timer *m
 	// Delete the dataset
 	if err := s.apiClient.DeleteDataset(ctx, datasetPath); err != nil {
 		// Check if error is because dataset doesn't exist
-		if isNotFoundError(err) {
+		if tnsapi.IsNotFound(err) {
 			klog.Infof("Detached snapshot dataset %s not found, assuming already deleted", datasetPath)
 			timer.ObserveSuccess()
 			return &csi.DeleteSnapshotResponse{}, nil

@@ -1,7 +1,10 @@
 // Package tnsapi provides a WebSocket client for TrueNAS Scale API.
 package tnsapi
 
-import "strconv"
+import (
+	"sort"
+	"strconv"
+)
 
 // Schema versioning for future migrations.
 const (
@@ -296,6 +299,44 @@ type NFSVolumeParams struct {
 	CapacityBytes  int64
 	ShareID        int
 	Adoptable      bool // Mark volume as adoptable for cross-cluster adoption
+}
+
+// UserPropertyKV is one ZFS user property in the list form pool.dataset.create accepts.
+type UserPropertyKV struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// OwnershipPropertiesV1 returns the properties that identify a volume as created and
+// owned by tns-csi. They are known before any share/target exists, so they are set by the
+// create call itself; protocol-specific properties (share/target IDs) follow later.
+func OwnershipPropertiesV1(volumeID, protocol, deleteStrategy, clusterID string, capacityBytes int64) map[string]string {
+	props := map[string]string{
+		PropertySchemaVersion:  SchemaVersionV1,
+		PropertyManagedBy:      ManagedByValue,
+		PropertyCSIVolumeName:  volumeID,
+		PropertyProtocol:       protocol,
+		PropertyDeleteStrategy: deleteStrategy,
+		PropertyCapacityBytes:  int64ToString(capacityBytes),
+	}
+	if clusterID != "" {
+		props[PropertyClusterID] = clusterID
+	}
+	return props
+}
+
+// UserPropertyList converts a property map to the create-call list form, sorted by key.
+func UserPropertyList(props map[string]string) []UserPropertyKV {
+	keys := make([]string, 0, len(props))
+	for k := range props {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]UserPropertyKV, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, UserPropertyKV{Key: k, Value: props[k]})
+	}
+	return out
 }
 
 // NFSVolumePropertiesV1 returns Schema v1 properties for an NFS volume.

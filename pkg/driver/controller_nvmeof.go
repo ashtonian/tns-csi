@@ -219,12 +219,12 @@ func validateNVMeOFParams(req *csi.CreateVolumeRequest) (*nvmeofVolumeParams, er
 
 // findExistingNVMeOFNamespace finds an existing namespace for a ZVOL in a subsystem.
 func (s *ControllerService) findExistingNVMeOFNamespace(ctx context.Context, devicePath string, subsystemID int) (*tnsapi.NVMeOFNamespace, error) {
-	namespaces, err := s.apiClient.QueryAllNVMeOFNamespaces(ctx)
+	namespaces, err := s.apiClient.QueryNVMeOFNamespaces(ctx, subsystemNamespacesFilter(subsystemID))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to query NVMe-oF namespaces: %v", err)
 	}
 
-	klog.V(4).Infof("Checking for existing namespace: device=%s, subsystem=%d, total namespaces=%d", devicePath, subsystemID, len(namespaces))
+	klog.V(4).Infof("Checking for existing namespace: device=%s, subsystem=%d, namespaces in subsystem=%d", devicePath, subsystemID, len(namespaces))
 
 	// Log all namespaces for this subsystem to help diagnose NSID conflicts
 	subsystemNamespaces := 0
@@ -376,12 +376,15 @@ func (s *ControllerService) handleExistingNVMeOFVolume(ctx context.Context, para
 // ensureNVMeOFProperties checks if ZFS properties are set on the ZVOL and sets them if missing.
 // This handles the case where a ZVOL was created but context expired before properties were set.
 func (s *ControllerService) ensureNVMeOFProperties(ctx context.Context, zvolID string, params *nvmeofVolumeParams, subsystem *tnsapi.NVMeOFSubsystem, namespace *tnsapi.NVMeOFNamespace) {
-	existing, err := s.apiClient.GetDatasetProperties(ctx, zvolID, []string{tnsapi.PropertyManagedBy})
+	// Key on the presentation IDs, not managed_by: ownership properties are written by the
+	// create call itself, so managed_by being set says nothing about whether these were.
+	recoveryKeys := []string{tnsapi.PropertyNVMeSubsystemID, tnsapi.PropertyNVMeNamespaceID}
+	existing, err := s.apiClient.GetDatasetProperties(ctx, zvolID, recoveryKeys)
 	if err != nil {
 		klog.Warningf("Failed to check properties on ZVOL %s: %v (skipping property recovery)", zvolID, err)
 		return
 	}
-	if existing[tnsapi.PropertyManagedBy] == tnsapi.ManagedByValue {
+	if presentationPropertiesRecorded(existing, recoveryKeys) {
 		return // Properties already set
 	}
 
@@ -676,6 +679,10 @@ func (s *ControllerService) getOrCreateZVOL(ctx context.Context, params *nvmeofV
 	}
 
 	// Create new ZVOL
+	// Ownership metadata goes in the create call itself, so the dataset can never exist
+	// without it (a later non-fatal property write could fail and leak the volume).
+	createParams.UserProperties = tnsapi.UserPropertyList(tnsapi.OwnershipPropertiesV1(
+		params.volumeName, tnsapi.ProtocolNVMeOF, params.deleteStrategy, s.clusterID, params.requestedCapacity))
 	zvol, err := s.apiClient.CreateZvol(ctx, createParams)
 	if err != nil {
 		timer.ObserveError()
@@ -716,65 +723,33 @@ func (s *ControllerService) createNVMeOFNamespaceForZVOL(ctx context.Context, zv
 // If verification passes, it may update meta with stored IDs from ZFS properties.
 // Also returns the deleteStrategy from ZFS properties (defaults to "delete" if not found).
 func (s *ControllerService) verifyNVMeOFOwnership(ctx context.Context, meta *VolumeMetadata) (string, error) {
-	deleteStrategy := tnsapi.DeleteStrategyDelete // Default to delete
-
 	if meta.DatasetID == "" {
-		return deleteStrategy, nil
+		return tnsapi.DeleteStrategyDelete, nil
 	}
 
-	props, err := s.apiClient.GetDatasetProperties(ctx, meta.DatasetID, []string{
-		tnsapi.PropertyManagedBy,
-		tnsapi.PropertyCSIVolumeName,
-		tnsapi.PropertyNVMeSubsystemID,
-		tnsapi.PropertyNVMeNamespaceID,
-		tnsapi.PropertyNVMeSubsystemNQN,
-		tnsapi.PropertyDeleteStrategy,
-	})
+	ownership, err := s.readVolumeOwnership(ctx, meta,
+		tnsapi.PropertyNVMeSubsystemID, tnsapi.PropertyNVMeNamespaceID, tnsapi.PropertyNVMeSubsystemNQN)
 	if err != nil {
-		// Properties not found - could be old volume or manual creation
-		klog.V(4).Infof("Could not read ZFS properties for %s: %v (proceeding with metadata-based deletion)", meta.DatasetID, err)
-		return deleteStrategy, nil
+		return "", err
 	}
-
-	// Verify managed_by property
-	if managedBy, ok := props[tnsapi.PropertyManagedBy]; ok && managedBy != tnsapi.ManagedByValue {
-		return "", status.Errorf(codes.FailedPrecondition,
-			"ZVOL %s is not managed by tns-csi (managed_by=%s), refusing to delete",
-			meta.DatasetID, managedBy)
-	}
-
-	// Verify volume name matches
-	// For dataset-path volume IDs (e.g., "tank/pvc-xxx"), the stored property is just the PVC name ("pvc-xxx")
-	if storedVolumeName, ok := props[tnsapi.PropertyCSIVolumeName]; ok {
-		nameMatches := storedVolumeName == meta.Name || (isDatasetPathVolumeID(meta.Name) && strings.HasSuffix(meta.Name, "/"+storedVolumeName))
-		if !nameMatches {
-			return "", status.Errorf(codes.FailedPrecondition,
-				"Volume name mismatch: ZVOL %s belongs to volume '%s', not '%s' (possible ID reuse)",
-				meta.DatasetID, storedVolumeName, meta.Name)
-		}
+	if ownership.notFound {
+		// The ZVOL is already gone; keep going so an orphaned namespace/subsystem is still cleaned up.
+		klog.V(4).Infof("ZVOL %s not found; proceeding with metadata-based cleanup", meta.DatasetID)
+		return tnsapi.DeleteStrategyDelete, nil
 	}
 
 	// Use stored IDs if available (more reliable than metadata after TrueNAS restart)
-	if storedSubsystemID, ok := props[tnsapi.PropertyNVMeSubsystemID]; ok {
-		if parsedID := tnsapi.StringToInt(storedSubsystemID); parsedID > 0 && parsedID != meta.NVMeOFSubsystemID {
-			klog.Infof("Using stored subsystem ID %d instead of metadata ID %d", parsedID, meta.NVMeOFSubsystemID)
-			meta.NVMeOFSubsystemID = parsedID
-		}
+	if parsedID := tnsapi.StringToInt(ownership.props[tnsapi.PropertyNVMeSubsystemID]); parsedID > 0 && parsedID != meta.NVMeOFSubsystemID {
+		klog.Infof("Using stored subsystem ID %d instead of metadata ID %d", parsedID, meta.NVMeOFSubsystemID)
+		meta.NVMeOFSubsystemID = parsedID
 	}
-	if storedNamespaceID, ok := props[tnsapi.PropertyNVMeNamespaceID]; ok {
-		if parsedID := tnsapi.StringToInt(storedNamespaceID); parsedID > 0 && parsedID != meta.NVMeOFNamespaceID {
-			klog.Infof("Using stored namespace ID %d instead of metadata ID %d", parsedID, meta.NVMeOFNamespaceID)
-			meta.NVMeOFNamespaceID = parsedID
-		}
-	}
-
-	// Get deleteStrategy from properties
-	if strategy, ok := props[tnsapi.PropertyDeleteStrategy]; ok && strategy != "" {
-		deleteStrategy = strategy
+	if parsedID := tnsapi.StringToInt(ownership.props[tnsapi.PropertyNVMeNamespaceID]); parsedID > 0 && parsedID != meta.NVMeOFNamespaceID {
+		klog.Infof("Using stored namespace ID %d instead of metadata ID %d", parsedID, meta.NVMeOFNamespaceID)
+		meta.NVMeOFNamespaceID = parsedID
 	}
 
 	klog.V(4).Infof("Ownership verified for ZVOL %s (volume: %s)", meta.DatasetID, meta.Name)
-	return deleteStrategy, nil
+	return ownership.deleteStrategy, nil
 }
 
 // deleteNVMeOFVolume deletes an NVMe-oF volume.
@@ -822,72 +797,63 @@ func (s *ControllerService) deleteNVMeOFVolume(ctx context.Context, meta *Volume
 		}
 	}
 
-	// Step 1: Delete ZVOL first (prevents orphaning namespace/subsystem if ZVOL can't be deleted)
-	// If the ZVOL has dependent clones, we must bail immediately — deleting namespace/subsystem
-	// would leave an orphaned ZVOL with no presentation layer, making recovery impossible.
-	zvolDeleted := true // assume deleted if DatasetID is empty
-	if meta.DatasetID != "" {
-		if err := s.deleteZVOL(ctx, meta); err != nil {
-			if isDependentClonesError(err) {
-				// Dependent clones will never resolve on their own — bail without touching
-				// namespace/subsystem so the volume remains fully functional until clones are removed
-				klog.Warningf("ZVOL %s has dependent clones — skipping namespace/subsystem cleanup to prevent orphaning", meta.DatasetID)
-				timer.ObserveError()
-				return nil, status.Errorf(codes.FailedPrecondition,
-					"cannot delete volume %s: ZVOL %s has dependent clones; delete the cloned volumes first",
-					meta.Name, meta.DatasetID)
-			}
-			// Other ZVOL deletion error — don't touch namespace/subsystem either
-			klog.Errorf("ZVOL %s deletion failed — skipping namespace/subsystem cleanup to avoid orphaning: %v", meta.DatasetID, err)
-			timer.ObserveError()
-			return nil, status.Errorf(codes.Internal,
-				"Failed to delete ZVOL %s: %v (namespace/subsystem preserved to prevent orphaning)", meta.DatasetID, err)
-		}
-		klog.V(4).Infof("Successfully deleted ZVOL %s", meta.DatasetID)
-	}
-
-	// Step 2: ZVOL is gone — clean up NVMe-oF resources (best effort)
-	// Even if these fail, data is already deleted and K8s will retry cleanup
+	// Step 1: Remove the NVMe-oF presentation (namespace, then subsystem) BEFORE the ZVOL.
+	// The ZVOL carries the ownership properties a retried DeleteVolume uses to find this
+	// volume; deleting it first meant a failed cleanup here was never retried and the
+	// namespace/subsystem leaked. Any failure keeps the ZVOL so the next attempt can finish.
 	var deletionErrors []error
 
 	namespaceDeleted := false
 	if err := s.deleteNVMeOFNamespace(ctx, meta); err != nil {
-		klog.Errorf("Failed to delete namespace %d (ZVOL already deleted, will retry): %v", meta.NVMeOFNamespaceID, err)
+		klog.Errorf("Failed to delete namespace %d (ZVOL kept, will retry): %v", meta.NVMeOFNamespaceID, err)
 		deletionErrors = append(deletionErrors, fmt.Errorf("namespace deletion failed: %w", err))
 	} else {
 		klog.V(4).Infof("Successfully deleted namespace %d", meta.NVMeOFNamespaceID)
 		namespaceDeleted = true
 	}
 
-	// Step 3: Delete NVMe-oF subsystem (only if namespace was deleted)
+	// Then the subsystem (only once its namespace is gone)
 	if !namespaceDeleted && meta.NVMeOFNamespaceID > 0 {
 		klog.Warningf("Skipping subsystem deletion because namespace %d deletion failed - subsystem %d cannot be deleted while namespace exists",
 			meta.NVMeOFNamespaceID, meta.NVMeOFSubsystemID)
 		deletionErrors = append(deletionErrors, errSubsystemDeletionSkipped)
 	} else if err := s.deleteNVMeOFSubsystem(ctx, meta); err != nil {
-		klog.Errorf("Failed to delete subsystem %d (ZVOL already deleted, will retry): %v", meta.NVMeOFSubsystemID, err)
+		klog.Errorf("Failed to delete subsystem %d (ZVOL kept, will retry): %v", meta.NVMeOFSubsystemID, err)
 		deletionErrors = append(deletionErrors, fmt.Errorf("subsystem deletion failed: %w", err))
 	} else {
 		klog.V(4).Infof("Successfully deleted subsystem %d", meta.NVMeOFSubsystemID)
 	}
 
-	// Evaluate cleanup results
-	if len(deletionErrors) == 0 && zvolDeleted {
-		klog.Infof("Deleted NVMe-oF volume: %s (ZVOL, namespace, and subsystem)", meta.Name)
-		metrics.DeleteVolumeCapacity(meta.Name, metrics.ProtocolNVMeOF)
-		timer.ObserveSuccess()
-		return &csi.DeleteVolumeResponse{}, nil
+	if len(deletionErrors) > 0 {
+		timer.ObserveError()
+		return nil, status.Errorf(codes.Unavailable,
+			"failed to remove NVMe-oF namespace/subsystem for volume %s (ZVOL kept so the deletion can be retried): %v",
+			meta.Name, deletionErrors)
 	}
 
-	// NVMe-oF resource cleanup failed (ZVOL is already gone — data is irrecoverable, but
-	// we need to retry to avoid orphaned namespace/subsystem on TrueNAS)
-	klog.Errorf("ZVOL deleted but failed to clean up %d NVMe-oF resource(s) for %s: %v",
-		len(deletionErrors), meta.Name, deletionErrors)
+	// Step 2: Delete the ZVOL last. If it still has dependent clones the deletion fails with
+	// FailedPrecondition; the ZVOL keeps its properties, so a later retry finds it again.
+	if meta.DatasetID != "" {
+		if err := s.deleteZVOL(ctx, meta); err != nil {
+			if tnsapi.IsDependentClones(err) {
+				klog.Warningf("ZVOL %s has dependent clones — cannot delete it until the clones are removed", meta.DatasetID)
+				timer.ObserveError()
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"cannot delete volume %s: ZVOL %s has dependent clones; delete the cloned volumes first",
+					meta.Name, meta.DatasetID)
+			}
+			klog.Errorf("ZVOL %s deletion failed: %v", meta.DatasetID, err)
+			timer.ObserveError()
+			return nil, status.Errorf(codes.Internal,
+				"Failed to delete ZVOL %s: %v", meta.DatasetID, err)
+		}
+		klog.V(4).Infof("Successfully deleted ZVOL %s", meta.DatasetID)
+	}
 
-	timer.ObserveError()
-	return nil, status.Errorf(codes.Internal,
-		"ZVOL deleted but failed to clean up NVMe-oF resources for %s (will retry): %v",
-		meta.Name, deletionErrors)
+	klog.Infof("Deleted NVMe-oF volume: %s (namespace, subsystem and ZVOL)", meta.Name)
+	metrics.DeleteVolumeCapacity(meta.Name, metrics.ProtocolNVMeOF)
+	timer.ObserveSuccess()
+	return &csi.DeleteVolumeResponse{}, nil
 }
 
 // deleteNVMeOFSubsystem deletes an NVMe-oF subsystem with retry logic for busy resources.
@@ -897,12 +863,21 @@ func (s *ControllerService) deleteNVMeOFSubsystem(ctx context.Context, meta *Vol
 	if meta.NVMeOFSubsystemID <= 0 {
 		return nil
 	}
+	owned, err := s.ownedNVMeOFSubsystem(ctx, meta)
+	if err != nil {
+		return presentationLookupFailed(meta, err)
+	}
+	if !owned {
+		// Gone, or the ID now belongs to another volume: nothing of ours to delete.
+		s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeSubsystemID)
+		return nil
+	}
 
 	klog.V(4).Infof("Deleting NVMe-oF subsystem: ID=%d (with retry for busy resources)", meta.NVMeOFSubsystemID)
 
 	// Step 1: Verify no namespaces are attached to this subsystem
 	// TrueNAS will refuse to delete subsystems with active namespaces
-	namespaces, err := s.apiClient.QueryAllNVMeOFNamespaces(ctx)
+	namespaces, err := s.apiClient.QueryNVMeOFNamespaces(ctx, subsystemNamespacesFilter(meta.NVMeOFSubsystemID))
 	if err != nil {
 		klog.Warningf("Failed to query namespaces for subsystem cleanup verification (continuing anyway): %v", err)
 	} else {
@@ -949,7 +924,7 @@ func (s *ControllerService) deleteNVMeOFSubsystem(ctx context.Context, meta *Vol
 	retryConfig := retry.DeletionConfig("delete-nvmeof-subsystem")
 	err = retry.WithRetryNoResult(ctx, retryConfig, func() error {
 		deleteErr := s.apiClient.DeleteNVMeOFSubsystem(ctx, meta.NVMeOFSubsystemID)
-		if deleteErr != nil && isNotFoundError(deleteErr) {
+		if deleteErr != nil && tnsapi.IsNotFound(deleteErr) {
 			// Subsystem already deleted - not an error (idempotency)
 			klog.V(4).Infof("Subsystem %d not found, assuming already deleted (idempotency)", meta.NVMeOFSubsystemID)
 			return nil
@@ -966,6 +941,7 @@ func (s *ControllerService) deleteNVMeOFSubsystem(ctx context.Context, meta *Vol
 	}
 
 	klog.V(4).Infof("Deleted NVMe-oF subsystem %d", meta.NVMeOFSubsystemID)
+	s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeSubsystemID)
 	return nil
 }
 
@@ -974,14 +950,24 @@ func (s *ControllerService) deleteNVMeOFNamespace(ctx context.Context, meta *Vol
 	if meta.NVMeOFNamespaceID <= 0 {
 		return nil
 	}
+	owned, err := s.ownedNVMeOFNamespace(ctx, meta)
+	if err != nil {
+		return presentationLookupFailed(meta, err)
+	}
+	if !owned {
+		// Gone, or the ID now belongs to another volume: nothing of ours to delete.
+		s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeNamespaceID)
+		meta.NVMeOFNamespaceID = 0
+		return nil
+	}
 
 	klog.V(4).Infof("Deleting NVMe-oF namespace: ID=%d, ZVOL=%s, dataset=%s (with retry for busy resources)",
 		meta.NVMeOFNamespaceID, meta.DatasetID, meta.DatasetName)
 
 	retryConfig := retry.DeletionConfig("delete-nvmeof-namespace")
-	err := retry.WithRetryNoResult(ctx, retryConfig, func() error {
+	err = retry.WithRetryNoResult(ctx, retryConfig, func() error {
 		deleteErr := s.apiClient.DeleteNVMeOFNamespace(ctx, meta.NVMeOFNamespaceID)
-		if deleteErr != nil && isNotFoundError(deleteErr) {
+		if deleteErr != nil && tnsapi.IsNotFound(deleteErr) {
 			// Namespace already deleted - not an error (idempotency)
 			klog.V(4).Infof("Namespace %d not found, assuming already deleted (idempotency)", meta.NVMeOFNamespaceID)
 			return nil
@@ -1000,7 +986,11 @@ func (s *ControllerService) deleteNVMeOFNamespace(ctx context.Context, meta *Vol
 	klog.V(4).Infof("Deleted NVMe-oF namespace %d (ZVOL: %s)", meta.NVMeOFNamespaceID, meta.DatasetID)
 
 	// Verify namespace is gone
-	return s.verifyNamespaceDeletion(ctx, meta)
+	if err := s.verifyNamespaceDeletion(ctx, meta); err != nil {
+		return err
+	}
+	s.forgetPresentationIDs(ctx, meta.DatasetID, tnsapi.PropertyNVMeNamespaceID)
+	return nil
 }
 
 // verifyNamespaceDeletion verifies that a namespace has been fully deleted.
@@ -1040,13 +1030,13 @@ func (s *ControllerService) deleteZVOL(ctx context.Context, meta *VolumeMetadata
 
 	// Try direct deletion first (common case: no dependent snapshots)
 	firstErr := s.apiClient.DeleteDataset(ctx, meta.DatasetID)
-	if firstErr == nil || isNotFoundError(firstErr) {
+	if firstErr == nil || tnsapi.IsNotFound(firstErr) {
 		klog.Infof("deleteZVOL: Successfully deleted ZVOL %s", meta.DatasetID)
 		return nil
 	}
 
 	// If dependent clones from deferred-destroy snapshots, promote them and retry
-	if isDependentClonesError(firstErr) {
+	if tnsapi.IsDependentClones(firstErr) {
 		if err := s.tryPromoteAndDeleteDataset(ctx, meta.DatasetID); err == nil {
 			return nil
 		}
@@ -1060,7 +1050,7 @@ func (s *ControllerService) deleteZVOL(ctx context.Context, meta *VolumeMetadata
 	retryConfig := retry.DeletionConfig("delete-zvol")
 	err := retry.WithRetryNoResult(ctx, retryConfig, func() error {
 		deleteErr := s.apiClient.DeleteDataset(ctx, meta.DatasetID)
-		if deleteErr != nil && isNotFoundError(deleteErr) {
+		if deleteErr != nil && tnsapi.IsNotFound(deleteErr) {
 			return nil
 		}
 		return deleteErr
@@ -1475,4 +1465,10 @@ func (s *ControllerService) expandNVMeOFVolume(ctx context.Context, meta *Volume
 		CapacityBytes:         requiredBytes,
 		NodeExpansionRequired: true, // NVMe-oF volumes require node-side filesystem expansion
 	}, nil
+}
+
+// subsystemNamespacesFilter selects the namespaces of one subsystem (nvmet.namespace.query).
+// Callers still check GetSubsystemID() client-side.
+func subsystemNamespacesFilter(subsystemID int) []interface{} {
+	return []interface{}{[]interface{}{"subsys_id", "=", subsystemID}}
 }

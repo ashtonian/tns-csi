@@ -39,11 +39,12 @@ type mockClient struct {
 	FindDatasetByCSIVolumeNameFunc func(ctx context.Context, prefix, csiVolumeName string) (*tnsapi.DatasetWithProperties, error)
 
 	// NFS share operations
-	CreateNFSShareFunc    func(ctx context.Context, params tnsapi.NFSShareCreateParams) (*tnsapi.NFSShare, error)
-	DeleteNFSShareFunc    func(ctx context.Context, shareID int) error
-	QueryNFSShareFunc     func(ctx context.Context, path string) ([]tnsapi.NFSShare, error)
-	QueryNFSShareByIDFunc func(ctx context.Context, shareID int) (*tnsapi.NFSShare, error)
-	QueryAllNFSSharesFunc func(ctx context.Context, pathPrefix string) ([]tnsapi.NFSShare, error)
+	CreateNFSShareFunc        func(ctx context.Context, params tnsapi.NFSShareCreateParams) (*tnsapi.NFSShare, error)
+	DeleteNFSShareFunc        func(ctx context.Context, shareID int) error
+	QueryNFSShareFunc         func(ctx context.Context, path string) ([]tnsapi.NFSShare, error)
+	QueryNFSShareByIDFunc     func(ctx context.Context, shareID int) (*tnsapi.NFSShare, error)
+	QueryAllNFSSharesFunc     func(ctx context.Context, pathPrefix string) ([]tnsapi.NFSShare, error)
+	QueryNVMeOFSubsystemsFunc func(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFSubsystem, error)
 
 	// ZVOL operations
 	CreateZvolFunc func(ctx context.Context, params tnsapi.ZvolCreateParams) (*tnsapi.Dataset, error)
@@ -609,4 +610,25 @@ func (m *mockClient) RunOnetimeReplicationAndWait(ctx context.Context, params tn
 
 func (m *mockClient) Close() {
 	// Mock client does not need cleanup.
+}
+
+// Filtered queries ignore the filters and return everything; callers re-check matches
+// client-side, so the unfiltered superset is still a correct answer.
+func (m *mockClient) QueryNFSShares(ctx context.Context, _ []interface{}) ([]tnsapi.NFSShare, error) {
+	return m.QueryAllNFSShares(ctx, "")
+}
+
+func (m *mockClient) QuerySMBShares(ctx context.Context, _ []interface{}) ([]tnsapi.SMBShare, error) {
+	return m.QueryAllSMBShares(ctx, "")
+}
+
+func (m *mockClient) QueryNVMeOFNamespaces(ctx context.Context, _ []interface{}) ([]tnsapi.NVMeOFNamespace, error) {
+	return m.QueryAllNVMeOFNamespaces(ctx)
+}
+
+func (m *mockClient) QueryNVMeOFSubsystems(ctx context.Context, filters []interface{}) ([]tnsapi.NVMeOFSubsystem, error) {
+	if m.QueryNVMeOFSubsystemsFunc != nil {
+		return m.QueryNVMeOFSubsystemsFunc(ctx, filters)
+	}
+	return m.ListAllNVMeOFSubsystems(ctx)
 }

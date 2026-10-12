@@ -5,11 +5,12 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -75,6 +76,32 @@ func (m *keyedMutex) release(key string, entry *keyedMutexEntry) {
 	m.mu.Unlock()
 }
 
+// removeStagingDir is os.Remove; tests replace it to simulate EBUSY without privileges.
+var removeStagingDir = os.Remove
+
+// removeEmptyStagingDir removes a share staging directory after unmount, but only if it
+// is empty. It never deletes contents: leftover files mean either the share is still
+// mounted (a mount check was wrong) or data landed on the node's disk, and neither may be
+// deleted by the driver. A non-empty directory is left in place with a warning; kubelet
+// also attempts to remove the staging directory after a successful unstage.
+//
+// EBUSY is different: it means the path is still a mount point, so the preceding mount
+// check was wrong. That is returned as an error (Internal) so kubelet retries the
+// unstage and the next mount check drives a real unmount, instead of reporting success
+// and leaving the share mounted with nothing left to unmount it.
+func removeEmptyStagingDir(stagingTargetPath string) error {
+	err := removeStagingDir(stagingTargetPath)
+	switch {
+	case err == nil, errors.Is(err, os.ErrNotExist):
+		return nil
+	case errors.Is(err, syscall.EBUSY):
+		return status.Errorf(codes.Internal, "staging path %s is still a mount point: %v", stagingTargetPath, err)
+	default:
+		klog.Warningf("Leaving staging path %s in place: %v (not removing contents)", stagingTargetPath, err)
+		return nil
+	}
+}
+
 func ensureStagingTarget(ctx context.Context, stagingTargetPath string) (bool, error) {
 	if err := os.MkdirAll(stagingTargetPath, 0o750); err != nil {
 		return false, status.Errorf(codes.Internal, "failed to create staging target path: %v", err)
@@ -88,11 +115,7 @@ func ensureStagingTarget(ctx context.Context, stagingTargetPath string) (bool, e
 }
 
 func detectBlockFilesystemType(ctx context.Context, devicePath string) (string, error) {
-	detectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(detectCtx, blkidPath, "-s", "TYPE", "-o", "value", devicePath)
-	output, err := cmd.CombinedOutput()
+	output, err := cmdexec.CombinedOutput(ctx, 10*time.Second, blkidPath, "-s", "TYPE", "-o", "value", devicePath)
 	if err != nil {
 		return "", status.Errorf(codes.FailedPrecondition,
 			"failed to detect filesystem type on %s: %v, output: %s", devicePath, err, truncateCommandOutput(output))
@@ -180,7 +203,7 @@ func runE2FSCK(ctx context.Context, devicePath string) ([]byte, error) {
 
 	// Do not bind process lifetime to the RPC context. Killing e2fsck during a repair
 	// can leave the filesystem in a worse state; let an in-progress check finish safely.
-	cmd := exec.CommandContext(context.WithoutCancel(ctx), e2fsckPath, "-p", devicePath)
+	cmd := cmdexec.CommandContext(context.WithoutCancel(ctx), e2fsckPath, "-p", devicePath)
 	var output cappedCommandOutput
 	cmd.Stdout = &output
 	cmd.Stderr = &output

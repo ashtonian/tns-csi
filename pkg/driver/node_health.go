@@ -6,21 +6,22 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
+	"github.com/fenio/tns-csi/pkg/mount"
 	"k8s.io/klog/v2"
 )
 
 // Static errors for health checks.
 var (
-	errMountTimeout      = errors.New("timeout checking mount status")
 	errReadTimeout       = errors.New("timeout reading directory")
 	errNotNVMeDevice     = errors.New("not an NVMe device")
 	errISCSIStateUnknown = errors.New("could not determine iSCSI session state")
+	errNotMounted        = errors.New("not mounted")
 )
 
 // sysClassNVMePath is the sysfs directory exposing NVMe controllers.
@@ -90,7 +91,7 @@ func (s *NodeService) checkVolumeHealth(ctx context.Context, volumePath, _ strin
 
 // detectProtocolFromVolumePath detects the protocol from the volume path.
 func (s *NodeService) detectProtocolFromVolumePath(ctx context.Context, volumePath string) string {
-	// Check the filesystem type using findmnt
+	// Check the filesystem type from the mount table
 	fsType, err := detectFilesystemType(ctx, volumePath)
 	if err != nil {
 		klog.V(4).Infof("Failed to detect filesystem type for %s: %v", volumePath, err)
@@ -126,7 +127,7 @@ func (s *NodeService) checkNFSHealth(ctx context.Context, volumePath string) Vol
 	}
 
 	// Check 2: Verify it's still mounted
-	mounted, err := isMountedWithTimeout(ctx, volumePath, 5*time.Second)
+	mounted, err := mount.IsMounted(ctx, volumePath)
 	if err != nil {
 		return Unhealthy(fmt.Sprintf("Failed to check NFS mount status: %v", err))
 	}
@@ -216,7 +217,7 @@ func (s *NodeService) checkSMBHealth(ctx context.Context, volumePath string) Vol
 	}
 
 	// Check 2: Verify it's still mounted
-	mounted, err := isMountedWithTimeout(ctx, volumePath, 5*time.Second)
+	mounted, err := mount.IsMounted(ctx, volumePath)
 	if err != nil {
 		return Unhealthy(fmt.Sprintf("Failed to check SMB mount status: %v", err))
 	}
@@ -238,27 +239,6 @@ func checkBasicHealth(volumePath string) VolumeHealth {
 		return Unhealthy(fmt.Sprintf("Volume path not accessible: %v", err))
 	}
 	return Healthy()
-}
-
-// isMountedWithTimeout checks if a path is mounted with a timeout.
-func isMountedWithTimeout(ctx context.Context, path string, timeout time.Duration) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "findmnt", "-n", path)
-	output, err := cmd.CombinedOutput()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return false, errMountTimeout
-	}
-	if err != nil {
-		// Exit code 1 means not mounted
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return false, nil
-		}
-		return false, err
-	}
-	return strings.TrimSpace(string(output)) != "", nil
 }
 
 // checkDirectoryReadable attempts to read directory entries to verify mount is responsive.
@@ -293,12 +273,14 @@ func checkDirectoryReadable(ctx context.Context, path string) error {
 
 // getSourceDevice gets the source device for a mount point.
 func getSourceDevice(ctx context.Context, mountPath string) (string, error) {
-	cmd := exec.CommandContext(ctx, "findmnt", "-n", "-o", "SOURCE", mountPath)
-	output, err := cmd.CombinedOutput()
+	entry, mounted, err := lookupMountedEntry(ctx, mountPath)
 	if err != nil {
-		return "", fmt.Errorf("findmnt failed: %w", err)
+		return "", err
 	}
-	return strings.TrimSpace(string(output)), nil
+	if !mounted {
+		return "", fmt.Errorf("%s: %w", mountPath, errNotMounted)
+	}
+	return entry.Source, nil
 }
 
 // getNVMeControllerState reads the NVMe controller state from sysfs.
@@ -310,26 +292,14 @@ func getNVMeControllerState(devicePath string) (string, error) {
 		return "", fmt.Errorf("%w: %s", errNotNVMeDevice, devicePath)
 	}
 
-	// Extract controller name (nvme0 from nvme0n1)
-	var ctrlName string
-	for i, c := range base {
-		if c == 'n' && i > 4 { // Skip "nvme" prefix
-			ctrlName = base[:i]
-			break
-		}
-	}
-	if ctrlName == "" {
-		ctrlName = base // Fallback
-	}
-
-	// Read state from /sys/class/nvme/<ctrl>/state
-	statePath := filepath.Join(sysClassNVMePath, ctrlName, "state")
-	data, err := os.ReadFile(statePath) //nolint:gosec // path is constructed from device name
+	// The controller comes from the namespace's sysfs owner, not from its name: under
+	// native multipath /dev/nvme1n1 may be served by nvme0/nvme2, and nvme1 may belong to
+	// another volume. With several paths, a live one is reported if there is any.
+	_, state, err := nvmeControllerForNamespace(sysBlockPath, devicePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read NVMe state: %w", err)
 	}
-
-	return strings.TrimSpace(string(data)), nil
+	return state, nil
 }
 
 // getISCSISessionState gets the state of an iSCSI session for a device.
@@ -350,7 +320,7 @@ func getISCSISessionState(ctx context.Context, devicePath string) (string, error
 	}
 
 	// Alternative: use iscsiadm to check session state
-	cmd := exec.CommandContext(ctx, "iscsiadm", "-m", "session", "-P", "1")
+	cmd := cmdexec.CommandContext(ctx, "iscsiadm", "-m", "session", "-P", "1")
 	output, cmdErr := cmd.CombinedOutput()
 	if cmdErr != nil {
 		return "", fmt.Errorf("iscsiadm failed: %w", cmdErr)

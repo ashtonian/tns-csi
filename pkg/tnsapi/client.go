@@ -91,14 +91,17 @@ type Client struct {
 	apiKey        string
 	connectedAt   time.Time // Track connection start time for metrics
 	retryInterval time.Duration
-	reqID         uint64
-	maxRetries    int
-	closed        bool
-	reconnecting  bool
-	skipTLSVerify bool // Skip TLS certificate verification
-	authGate      chan struct{}
-	reconnectDone chan struct{}
-	readLimit     int64 // Max WebSocket message size accepted from TrueNAS, in bytes
+	// connectRetryDelays holds the wait before each NewClient connection attempt
+	// (one entry per attempt; the first is normally 0). Tests shorten it.
+	connectRetryDelays []time.Duration
+	reqID              uint64
+	maxRetries         int
+	closed             bool
+	reconnecting       bool
+	skipTLSVerify      bool // Skip TLS certificate verification
+	authGate           chan struct{}
+	reconnectDone      chan struct{}
+	readLimit          int64 // Max WebSocket message size accepted from TrueNAS, in bytes
 
 	// reauthMu coordinates session re-authentication after ENOTAUTHENTICATED.
 	// Concurrent calls wait on reauthDone and reuse a re-authentication that
@@ -214,6 +217,21 @@ func WithReadLimit(n int64) ClientOption {
 	}
 }
 
+// defaultConnectRetryDelays is the wait before each initial connection attempt.
+// Five attempts over ~75s tolerate TrueNAS or the network coming up after the driver.
+var defaultConnectRetryDelays = []time.Duration{0, 5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second}
+
+// WithConnectRetryDelays overrides the per-attempt waits used while establishing the
+// initial connection in NewClient. The number of attempts equals len(delays); an empty
+// list keeps the default.
+func WithConnectRetryDelays(delays ...time.Duration) ClientOption {
+	return func(c *Client) {
+		if len(delays) > 0 {
+			c.connectRetryDelays = delays
+		}
+	}
+}
+
 // NewClient creates a new storage API client.
 // skipTLSVerify should be set to true only for self-signed certificates (common in TrueNAS deployments).
 func NewClient(url, apiKey string, skipTLSVerify bool, opts ...ClientOption) (*Client, error) {
@@ -225,15 +243,16 @@ func NewClient(url, apiKey string, skipTLSVerify bool, opts ...ClientOption) (*C
 
 	newClientState := func() *Client {
 		c := &Client{
-			url:           url,
-			apiKey:        apiKey,
-			pending:       make(map[string]chan *Response),
-			closeCh:       make(chan struct{}),
-			maxRetries:    5,
-			retryInterval: 5 * time.Second,
-			skipTLSVerify: skipTLSVerify,
-			authGate:      make(chan struct{}, 1),
-			readLimit:     DefaultReadLimit,
+			url:                url,
+			apiKey:             apiKey,
+			pending:            make(map[string]chan *Response),
+			closeCh:            make(chan struct{}),
+			maxRetries:         5,
+			retryInterval:      5 * time.Second,
+			connectRetryDelays: defaultConnectRetryDelays,
+			skipTLSVerify:      skipTLSVerify,
+			authGate:           make(chan struct{}, 1),
+			readLimit:          DefaultReadLimit,
 		}
 		for _, opt := range opts {
 			opt(c)
@@ -244,8 +263,8 @@ func NewClient(url, apiKey string, skipTLSVerify bool, opts ...ClientOption) (*C
 
 	// Connect to WebSocket with retry logic
 	// This is critical for driver initialization in environments with intermittent network connectivity
-	maxAttempts := 5
-	retryDelays := []time.Duration{0, 5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second}
+	retryDelays := c.connectRetryDelays
+	maxAttempts := len(retryDelays)
 
 	var lastConnErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -616,6 +635,31 @@ func isConnectionError(err error) bool {
 		strings.Contains(errStr, "i/o timeout")
 }
 
+// ErrUncertainOutcome is returned when a non-idempotent request was sent but the
+// connection was lost before its response arrived: TrueNAS may or may not have applied it.
+var ErrUncertainOutcome = errors.New("request outcome unknown: connection lost after the request was sent")
+
+// errResponseLost marks a request that was written to the connection but whose
+// response never arrived because the connection was lost.
+var errResponseLost = errors.New("connection lost after the request was sent")
+
+// isIdempotentMethod reports whether repeating method has the same effect as running it
+// once, so it may be retried after its response was lost. Reads, absolute-state updates
+// and deletes (callers treat not-found as already deleted) qualify. Creates, clones,
+// promotions, replication runs and anything unknown do not: they default to no retry.
+func isIdempotentMethod(method string) bool {
+	switch method {
+	case "core.get_jobs", "filesystem.stat", "filesystem.getacl", "filesystem.setacl":
+		return true
+	}
+	for _, suffix := range []string{".query", ".config", ".update", ".delete"} {
+		if strings.HasSuffix(method, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Call makes a JSON-RPC 2.0 call with automatic retry on connection failures.
 func (c *Client) Call(ctx context.Context, method string, params []interface{}, result interface{}) error {
 	// Start timing for metrics
@@ -674,6 +718,10 @@ func (c *Client) prepareCallRetry(
 	// auth retries themselves and need the connection loss immediately.
 	if method == methodAuthLoginWithAPIKey && isConnectionError(err) {
 		return nil, false, err
+	}
+	// A request that may already have been applied is only repeated if that is harmless.
+	if errors.Is(err, errResponseLost) && !isIdempotentMethod(method) {
+		return nil, false, fmt.Errorf("%w (%s): %w", ErrUncertainOutcome, method, err)
 	}
 	if waitErr := c.waitForCallRetry(ctx, attempt, maxRetries, err); waitErr != nil {
 		return nil, false, waitErr
@@ -795,8 +843,9 @@ func (c *Client) callOnce(ctx context.Context, method string, params []interface
 	select {
 	case resp, ok := <-respCh:
 		if !ok {
-			// Channel was closed, connection error occurred
-			return requestEpoch, ErrConnectionClosed
+			// The connection was lost after the request was written: TrueNAS may have
+			// applied it. Still an ErrConnectionClosed for existing callers.
+			return requestEpoch, fmt.Errorf("%w: %w", ErrConnectionClosed, errResponseLost)
 		}
 		metrics.RecordWSMessage("received")
 		if resp.Error != nil {
@@ -1195,6 +1244,10 @@ type EncryptionOptions struct {
 type DatasetCreateParams struct {
 	Name string `json:"name"`
 	Type string `json:"type"` // FILESYSTEM, VOLUME
+
+	// UserProperties are ZFS user properties set atomically by pool.dataset.create
+	// (TrueNAS 25.10+), so a dataset never exists without its ownership metadata.
+	UserProperties []UserPropertyKV `json:"user_properties,omitempty"`
 
 	// ShareType tells TrueNAS to optimize the dataset for a specific sharing protocol.
 	// "SMB" configures NFSv4 ACLs (acltype=nfsv4, aclmode=restricted) automatically.
@@ -1661,6 +1714,9 @@ func (c *Client) SetFilesystemACL(ctx context.Context, path string) error {
 //
 //nolint:govet // fieldalignment: struct layout prioritizes readability over memory optimization
 type ZvolCreateParams struct {
+	// UserProperties: see DatasetCreateParams.UserProperties.
+	UserProperties []UserPropertyKV `json:"user_properties,omitempty"`
+
 	Name         string `json:"name"`
 	Type         string `json:"type"`
 	Volblocksize string `json:"volblocksize,omitempty"`
@@ -1881,19 +1937,18 @@ func (c *Client) QueryNVMeOFNamespaceByID(ctx context.Context, namespaceID int) 
 func (c *Client) QueryNVMeOFSubsystem(ctx context.Context, nqn string) ([]NVMeOFSubsystem, error) {
 	klog.V(4).Infof("Querying NVMe-oF subsystems for NQN: %s", nqn)
 
-	// List all subsystems - server-side filtering doesn't work reliably
-	// because the NQN field name varies between TrueNAS versions
-	allSubsystems, err := c.ListAllNVMeOFSubsystems(ctx)
+	// Filter on 'name' (the short NQN without the UUID prefix) on the server. The API
+	// response has both:
+	// - 'name': short NQN (e.g., "nqn.2005-03.org.truenas:csi-test")
+	// - 'subnqn': full NQN with UUID prefix (e.g., "nqn.2011-06.com.truenas:uuid:<uuid>:nqn.2005-03.org.truenas:csi-test")
+	subsystems, err := c.QueryNVMeOFSubsystems(ctx, []interface{}{[]interface{}{filterFieldName, "=", nqn}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list subsystems: %w", err)
 	}
 
-	// Filter client-side by matching the 'name' field (short NQN without UUID prefix)
-	// The API response has both:
-	// - 'name': short NQN (e.g., "nqn.2005-03.org.truenas:csi-test")
-	// - 'subnqn': full NQN with UUID prefix (e.g., "nqn.2011-06.com.truenas:uuid:<uuid>:nqn.2005-03.org.truenas:csi-test")
+	// Re-check client-side; cheap, and keeps the result exact if a server ever ignores the filter.
 	var result []NVMeOFSubsystem
-	for _, sub := range allSubsystems {
+	for _, sub := range subsystems {
 		if sub.Name == nqn {
 			result = append(result, sub)
 		}
@@ -1910,36 +1965,11 @@ func (c *Client) NVMeOFSubsystemByNQN(ctx context.Context, nqn string) (*NVMeOFS
 
 	subsystems, err := c.QueryNVMeOFSubsystem(ctx, nqn)
 	if err != nil {
-		klog.Errorf("Failed to query NVMe-oF subsystem: %v", err)
-
-		// Try to list all subsystems for debugging
-		klog.Infof("Attempting to list all NVMe-oF subsystems for debugging...")
-		allSubsystems, listErr := c.ListAllNVMeOFSubsystems(ctx)
-		if listErr != nil {
-			klog.Errorf("Failed to list all subsystems: %v", listErr)
-		} else {
-			klog.Infof("Found %d total NVMe-oF subsystems:", len(allSubsystems))
-			for _, sub := range allSubsystems {
-				klog.Infof("  - ID=%d, NQN=%s", sub.ID, sub.NQN)
-			}
-		}
-
 		return nil, fmt.Errorf("failed to query subsystem: %w", err)
 	}
-
 	if len(subsystems) == 0 {
-		// Try listing all subsystems to help with debugging
-		klog.Warningf("No subsystems found with NQN %s, listing all subsystems...", nqn)
-		allSubsystems, listErr := c.ListAllNVMeOFSubsystems(ctx)
-		if listErr == nil {
-			klog.Infof("Found %d total NVMe-oF subsystems:", len(allSubsystems))
-			for _, sub := range allSubsystems {
-				klog.Infof("  - ID=%d, Name=%s, FullNQN=%s", sub.ID, sub.Name, sub.NQN)
-			}
-		}
 		return nil, fmt.Errorf("%w: NQN %s", ErrSubsystemNotFound, nqn)
 	}
-
 	if len(subsystems) > 1 {
 		return nil, fmt.Errorf("%w: NQN %s (expected 1, found %d)", ErrMultipleSubsystems, nqn, len(subsystems))
 	}
@@ -2424,36 +2454,11 @@ func (c *Client) QueryAllNFSShares(ctx context.Context, pathFilter string) ([]NF
 
 // QueryAllNVMeOFNamespaces queries all NVMe-oF namespaces.
 func (c *Client) QueryAllNVMeOFNamespaces(ctx context.Context) ([]NVMeOFNamespace, error) {
-	klog.V(5).Info("Querying all NVMe-oF namespaces")
-
-	// First, get raw JSON to debug the actual field names
-	var rawResult json.RawMessage
-	err := c.Call(ctx, "nvmet.namespace.query", []interface{}{}, &rawResult)
+	result, err := c.QueryNVMeOFNamespaces(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query NVMe-oF namespaces: %w", err)
+		return nil, err
 	}
-
-	// Log raw JSON for debugging (first 2000 chars to avoid log spam)
-	rawStr := string(rawResult)
-	if len(rawStr) > 2000 {
-		rawStr = rawStr[:2000] + "..."
-	}
-	klog.Infof("QueryAllNVMeOFNamespaces: Raw JSON response: %s", rawStr)
-
-	// Now unmarshal into our struct
-	var result []NVMeOFNamespace
-	if err := json.Unmarshal(rawResult, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal NVMe-oF namespaces: %w", err)
-	}
-
-	klog.Infof("QueryAllNVMeOFNamespaces: Found %d NVMe-oF namespaces", len(result))
-	// Log first 3 namespaces for debugging
-	for i, ns := range result {
-		if i >= 3 {
-			break
-		}
-		klog.Infof("QueryAllNVMeOFNamespaces: Sample namespace %d: ID=%d, Device='%s', DevicePath='%s', SubsystemID=%d, SubsystemNQN='%s', NSID=%d", i, ns.ID, ns.Device, ns.DevicePath, ns.GetSubsystemID(), ns.GetSubsystemNQN(), ns.NSID)
-	}
+	klog.V(5).Infof("QueryAllNVMeOFNamespaces: found %d NVMe-oF namespaces", len(result))
 	return result, nil
 }
 
@@ -3417,4 +3422,53 @@ func (c *Client) ReloadSMBService(ctx context.Context) error {
 
 	klog.V(4).Infof("SMB/CIFS service reload completed (job ID: %d)", jobID)
 	return nil
+}
+
+// queryFilters returns filters, or an empty filter list when filters is nil
+// (TrueNAS expects either no params or a valid filter array).
+func queryFilters(filters []interface{}) []interface{} {
+	if filters == nil {
+		return []interface{}{}
+	}
+	return filters
+}
+
+// QueryNFSShares returns the NFS shares matching filters (TrueNAS query-filters, e.g.
+// [["path", "=", "/mnt/tank/pvc-1"]]). Prefer this over QueryAllNFSShares whenever the
+// caller is looking for specific shares.
+func (c *Client) QueryNFSShares(ctx context.Context, filters []interface{}) ([]NFSShare, error) {
+	var result []NFSShare
+	if err := c.Call(ctx, "sharing.nfs.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("failed to query NFS shares: %w", err)
+	}
+	return result, nil
+}
+
+// QuerySMBShares returns the SMB shares matching filters.
+func (c *Client) QuerySMBShares(ctx context.Context, filters []interface{}) ([]SMBShare, error) {
+	var result []SMBShare
+	if err := c.Call(ctx, "sharing.smb.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("failed to query SMB shares: %w", err)
+	}
+	return result, nil
+}
+
+// QueryNVMeOFNamespaces returns the NVMe-oF namespaces matching filters, e.g.
+// [["subsys_id", "=", 7]].
+func (c *Client) QueryNVMeOFNamespaces(ctx context.Context, filters []interface{}) ([]NVMeOFNamespace, error) {
+	var result []NVMeOFNamespace
+	if err := c.Call(ctx, "nvmet.namespace.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("failed to query NVMe-oF namespaces: %w", err)
+	}
+	return result, nil
+}
+
+// QueryNVMeOFSubsystems returns the NVMe-oF subsystems matching filters, e.g.
+// [["id", "=", 7]] or [["name", "=", nqn]].
+func (c *Client) QueryNVMeOFSubsystems(ctx context.Context, filters []interface{}) ([]NVMeOFSubsystem, error) {
+	var result []NVMeOFSubsystem
+	if err := c.Call(ctx, "nvmet.subsys.query", []interface{}{queryFilters(filters)}, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrListSubsystemsFailed, err)
+	}
+	return result, nil
 }

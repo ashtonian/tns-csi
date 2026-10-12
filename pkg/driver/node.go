@@ -3,13 +3,13 @@ package driver
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/metrics"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"github.com/fenio/tns-csi/pkg/tnsapi"
@@ -267,7 +267,7 @@ func (s *NodeService) detectProtocolFromStagingPath(ctx context.Context, staging
 	}
 
 	// Check if it's mounted
-	mounted, err := mount.IsMounted(ctx, stagingPath)
+	_, mounted, err := lookupMountedEntry(ctx, stagingPath)
 	if err != nil || !mounted {
 		// Not mounted or error - check if there's a block device symlink
 		// For block volumes, the staging path is a symlink to the device
@@ -284,7 +284,7 @@ func (s *NodeService) detectProtocolFromStagingPath(ctx context.Context, staging
 		return ProtocolNFS
 	}
 
-	// It's mounted - check the filesystem type using findmnt
+	// It's mounted - check the filesystem type from the mount table
 	fsType, err := detectFilesystemType(ctx, stagingPath)
 	if err != nil {
 		// Default to NFS if we can't detect
@@ -322,15 +322,11 @@ func (s *NodeService) detectBlockProtocolFromDevice(devicePath string) string {
 
 // detectBlockProtocolFromMount determines the block protocol from a mounted path.
 func (s *NodeService) detectBlockProtocolFromMount(ctx context.Context, mountPath string) string {
-	// Get the source device from findmnt
-	cmd := exec.CommandContext(ctx, "findmnt", "-n", "-o", "SOURCE", mountPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	entry, mounted, err := lookupMountedEntry(ctx, mountPath)
+	if err != nil || !mounted {
 		return ProtocolNVMeOF // Default to NVMe-oF
 	}
-
-	devicePath := strings.TrimSpace(string(output))
-	return s.detectBlockProtocolFromDevice(devicePath)
+	return s.detectBlockProtocolFromDevice(entry.Source)
 }
 
 // isISCSIDevice checks if a device is an iSCSI device by looking for iSCSI by-path symlinks.
@@ -682,7 +678,7 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	}
 
 	// Check if the path is mounted
-	mounted, err := mount.IsMounted(ctx, volumePath)
+	_, mounted, err := lookupMountedEntry(ctx, volumePath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to check if path is mounted: %v", err)
 	}
@@ -718,14 +714,14 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	// Detect filesystem type
 	fsType, err := detectFilesystemType(ctx, volumePath)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to detect filesystem type: %v", err)
+		return nil, keepStatus(err, codes.Internal, "Failed to detect filesystem type")
 	}
 
 	klog.V(4).Infof("Detected filesystem type: %s", fsType)
 
 	// Resize based on filesystem type
 	if err := resizeFilesystem(ctx, volumePath, fsType); err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to resize filesystem: %v", err)
+		return nil, keepStatus(err, codes.Internal, "Failed to resize filesystem")
 	}
 
 	klog.V(4).Infof("Resized filesystem for volume %s", volumeID)
@@ -800,46 +796,49 @@ func safeUint64ToInt64(val uint64) int64 {
 	return int64(val)
 }
 
-// detectFilesystemType detects the filesystem type at the given mount point.
-// It uses findmnt to determine the filesystem type.
-func detectFilesystemType(ctx context.Context, mountPath string) (string, error) {
-	// Use findmnt to get filesystem information
-	// -n = no headings, -o FSTYPE = only output filesystem type
-	cmd := exec.CommandContext(ctx, "findmnt", "-n", "-o", "FSTYPE", mountPath)
-	output, err := cmd.CombinedOutput()
+// mountedEntryOrError returns the topmost mount at mountPath from the mount table.
+// Unlike findmnt, stacked mounts yield one entry (the visible one), not one line each.
+func mountedEntryOrError(ctx context.Context, mountPath string) (mount.Entry, error) {
+	entry, mounted, err := lookupMountedEntry(ctx, mountPath)
 	if err != nil {
-		return "", status.Errorf(codes.Internal, "Failed to detect filesystem type: %v, output: %s", err, string(output))
+		return mount.Entry{}, status.Errorf(codes.Internal, "Failed to read mount table for %s: %v", mountPath, err)
 	}
-
-	fsType := strings.TrimSpace(string(output))
-	if fsType == "" {
-		return "", status.Error(codes.Internal, "Empty filesystem type returned from findmnt")
+	if !mounted {
+		return mount.Entry{}, status.Errorf(codes.FailedPrecondition, "%s is not mounted", mountPath)
 	}
+	return entry, nil
+}
 
-	return fsType, nil
+// detectFilesystemType detects the filesystem type at the given mount point.
+func detectFilesystemType(ctx context.Context, mountPath string) (string, error) {
+	entry, err := mountedEntryOrError(ctx, mountPath)
+	if err != nil {
+		return "", err
+	}
+	if entry.FSType == "" {
+		return "", status.Errorf(codes.Internal, "Empty filesystem type in mount table for %s", mountPath)
+	}
+	return entry.FSType, nil
 }
 
 // resizeFilesystem resizes the filesystem at the given path based on filesystem type.
 func resizeFilesystem(ctx context.Context, mountPath, fsType string) error {
 	switch fsType {
 	case fsTypeExt2, fsTypeExt3, fsTypeExt4:
-		// For ext filesystems, we need to find the underlying device
-		// Use findmnt to get the source device
-		cmd := exec.CommandContext(ctx, "findmnt", "-n", "-o", "SOURCE", mountPath)
-		output, err := cmd.CombinedOutput()
+		// For ext filesystems, resize2fs needs the underlying device.
+		entry, err := mountedEntryOrError(ctx, mountPath)
 		if err != nil {
-			return status.Errorf(codes.Internal, "Failed to find device for mount path: %v, output: %s", err, string(output))
+			return err
 		}
-
-		device := strings.TrimSpace(string(output))
-		if device == "" {
-			return status.Error(codes.Internal, "Empty device path returned from findmnt")
+		device := entry.Source
+		if !strings.HasPrefix(device, "/dev/") {
+			return status.Errorf(codes.Internal, "Mount source %q for %s is not a block device", device, mountPath)
 		}
 
 		klog.V(4).Infof("Resizing ext filesystem on device %s", device)
-		// #nosec G204 -- device path is validated via findmnt output
-		cmd = exec.CommandContext(ctx, "resize2fs", device)
-		output, err = cmd.CombinedOutput()
+		// #nosec G204 -- device path comes from the kernel mount table and is checked to be under /dev/
+		cmd := cmdexec.CommandContext(ctx, "resize2fs", device)
+		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return status.Errorf(codes.Internal, "resize2fs failed: %v, output: %s", err, string(output))
 		}
@@ -849,7 +848,7 @@ func resizeFilesystem(ctx context.Context, mountPath, fsType string) error {
 	case fsTypeXFS:
 		// For XFS, xfs_growfs operates on the mount point
 		klog.V(4).Infof("Resizing XFS filesystem at mount point %s", mountPath)
-		cmd := exec.CommandContext(ctx, "xfs_growfs", mountPath)
+		cmd := cmdexec.CommandContext(ctx, "xfs_growfs", mountPath)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return status.Errorf(codes.Internal, "xfs_growfs failed: %v, output: %s", err, string(output))
@@ -860,4 +859,14 @@ func resizeFilesystem(ctx context.Context, mountPath, fsType string) error {
 	default:
 		return status.Errorf(codes.Unimplemented, "Filesystem type %s is not supported for expansion", fsType)
 	}
+}
+
+// keepStatus returns err unchanged if it already carries a gRPC status (the helpers
+// choose codes such as FailedPrecondition or Unimplemented deliberately); otherwise it
+// wraps err with code and msg.
+func keepStatus(err error, code codes.Code, msg string) error {
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
+	return status.Errorf(code, "%s: %v", msg, err)
 }
