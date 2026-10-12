@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestIsDeviceNotReady(t *testing.T) {
@@ -184,20 +183,23 @@ func TestCheckDeviceFilesystemCanceledProbeCannotFormat(t *testing.T) {
 	binDir := t.TempDir()
 	for name, script := range map[string]string{
 		"lsblk": "#!/bin/sh\nprintf '\\n'\n",
-		"blkid": "#!/bin/sh\nsleep 1\nexit 2\n",
+		"blkid": "#!/bin/sh\nexit 2\n",
 	} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	format, _, err := checkDeviceFilesystemWithProbe(ctx, "/dev/test", func(probeCtx context.Context, path string) ([]byte, error) {
+		// Cancel only after lsblk has finished and the direct probe is reached.
+		// A short wall-clock deadline can instead kill lsblk on a loaded runner.
+		cancel()
 		return exec.CommandContext(probeCtx, filepath.Join(binDir, "blkid"), path).CombinedOutput()
 	})
-	if format || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("checkDeviceFilesystem() = %v, %v; want false, deadline exceeded", format, err)
+	if format || !errors.Is(err, context.Canceled) {
+		t.Fatalf("checkDeviceFilesystem() = %v, %v; want false, context canceled", format, err)
 	}
 }
 
