@@ -163,6 +163,16 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Include version-specific release notes
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          NOTES="docs/releases/${RELEASE_VERSION}.md"
+          if [ -f "$NOTES" ]; then
+            { cat "$NOTES"; printf '\n\n'; cat CHANGELOG.md; } > CHANGELOG.with-notes.md
+            mv CHANGELOG.with-notes.md CHANGELOG.md
+          fi
+
       - name: Append installation instructions
         run: |
           VERSION=${{ steps.version.outputs.version }}

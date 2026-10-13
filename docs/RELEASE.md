@@ -33,6 +33,12 @@ After adding secrets, they should appear in:
 
 The release process is fully automated via GitHub Actions.
 
+To prepare a release without publishing it, add version-specific highlights and
+upgrade notes in `docs/releases/<tag>.md` (for example, `docs/releases/v0.20.0.md`).
+The release workflow prepends this file to the generated changelog when it exists.
+Publishing still requires an explicitly pushed version tag; preparing notes or
+updating the chart source version does not publish a release.
+
 ### Creating a Release
 
 1. **Ensure main branch is ready**
