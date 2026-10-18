@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-
-	"k8s.io/klog/v2"
 )
 
 // sysBlockPath is the sysfs directory listing block devices. Tests point it elsewhere.
@@ -40,10 +38,10 @@ var errNVMeNoController = errors.New("no NVMe controller for namespace")
 // after the subsystem instance, so "/dev/<controller>n1" can be another volume's disk.
 // Volumes use independent subsystems with NSID 1; if several namespaces match, NSID 1
 // wins and anything else ambiguous is an error rather than a guess.
-func nvmeNamespaceDeviceForNQN(sysBlock, nqn string) (string, error) {
+func nvmeNamespaceDevicesForNQN(sysBlock, nqn string) ([]string, error) {
 	entries, err := os.ReadDir(sysBlock)
 	if err != nil {
-		return "", fmt.Errorf("failed to read %s: %w", sysBlock, err)
+		return nil, fmt.Errorf("failed to read %s: %w", sysBlock, err)
 	}
 	var matches []string
 	for _, e := range entries {
@@ -52,10 +50,27 @@ func nvmeNamespaceDeviceForNQN(sysBlock, nqn string) (string, error) {
 			continue
 		}
 		owner, readErr := readSysfsValue(filepath.Join(sysBlock, name, "device", "subsysnqn"))
-		if readErr != nil || owner != nqn {
+		if readErr != nil {
+			return nil, fmt.Errorf("%w: namespace %s: %w", ErrNVMeDiscoveryUnknown, name, readErr)
+		}
+		if owner == "" {
+			return nil, fmt.Errorf("%w: namespace %s: %w", ErrNVMeDiscoveryUnknown, name, ErrNVMeEmptyNQN)
+		}
+		if owner != nqn {
 			continue
 		}
 		matches = append(matches, name)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("%w for NQN: %s", ErrNVMeDeviceNotFound, nqn)
+	}
+	return matches, nil
+}
+
+func nvmeNamespaceDeviceForNQN(sysBlock, nqn string) (string, error) {
+	matches, err := nvmeNamespaceDevicesForNQN(sysBlock, nqn)
+	if err != nil {
+		return "", err
 	}
 	switch len(matches) {
 	case 0:
@@ -86,17 +101,6 @@ func nvmeNQNForDevice(sysBlock, devicePath string) (string, error) {
 		return "", fmt.Errorf("%s: %w", p, ErrNVMeEmptyNQN)
 	}
 	return nqn, nil
-}
-
-// nvmeNamespaceDeviceOrEmpty resolves nqn's namespace device, or "" if it cannot be
-// resolved yet (the caller polls, rescans, or reports not-found).
-func nvmeNamespaceDeviceOrEmpty(nqn string) string {
-	devicePath, err := nvmeNamespaceDeviceForNQN(sysBlockPath, nqn)
-	if err != nil {
-		klog.V(5).Infof("NVMe namespace device for %s not resolvable yet: %v", nqn, err)
-		return ""
-	}
-	return devicePath
 }
 
 func readSysfsValue(path string) (string, error) {

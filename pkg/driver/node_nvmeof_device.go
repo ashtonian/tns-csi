@@ -2,9 +2,9 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,11 +17,6 @@ import (
 // This handles transient failures when TrueNAS has just created a new subsystem
 // (e.g., for snapshot-restored volumes) but it's not yet fully ready for connections.
 func (s *NodeService) connectNVMeOFTarget(ctx context.Context, params *nvmeOFConnectionParams) error {
-	// Connect and disconnect both mutate the kernel NVMe controller registry.
-	// Serializing those transitions prevents teardown from racing registration.
-	s.nvmeLifecycleMu.Lock()
-	defer s.nvmeLifecycleMu.Unlock()
-
 	if s.enableDiscovery {
 		// Discover the NVMe-oF target
 		klog.V(4).Infof("Discovering NVMe-oF target at %s:%s", params.server, params.port)
@@ -50,7 +45,7 @@ func (s *NodeService) connectNVMeOFTarget(ctx context.Context, params *nvmeOFCon
 	}
 
 	if err := retry.WithRetryNoResult(ctx, config, func() error {
-		return s.attemptNVMeConnect(ctx, params)
+		return s.connectNVMeIfAbsent(ctx, params)
 	}); err != nil {
 		return err
 	}
@@ -60,12 +55,34 @@ func (s *NodeService) connectNVMeOFTarget(ctx context.Context, params *nvmeOFCon
 	// where we look for the device before the kernel has finished setting it up.
 	const postConnectDelay = 2 * time.Second
 	klog.V(4).Infof("Waiting %v for kernel to register NVMe controller and namespaces", postConnectDelay)
-	time.Sleep(postConnectDelay)
+	if err := waitNVMeContext(ctx, postConnectDelay); err != nil {
+		return err
+	}
 
 	// Trigger udev to process new NVMe devices
 	triggerUdevForNVMeSubsystem(ctx)
 
 	return nil
+}
+
+// connectNVMeIfAbsent rechecks identity while registration and teardown are serialized.
+func (s *NodeService) connectNVMeIfAbsent(ctx context.Context, params *nvmeOFConnectionParams) error {
+	unlock, err := s.nvmeLifecycleLocks.lock(ctx, "registry")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, findErr := s.findNVMeDeviceByNQN(ctx, params.nqn)
+	if findErr == nil || errors.Is(findErr, ErrNVMeDeviceUnhealthy) {
+		return nil
+	}
+	if !errors.Is(findErr, ErrNVMeDeviceNotFound) {
+		return findErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.attemptNVMeConnect(ctx, params)
 }
 
 // attemptNVMeConnect performs a single NVMe connect attempt.
@@ -76,34 +93,16 @@ func (s *NodeService) attemptNVMeConnect(ctx context.Context, params *nvmeOFConn
 	// NVMe-oF connection with resilience and performance options:
 	// --reconnect-delay=2: Wait 2 seconds before reconnecting after connection loss
 	// --ctrl-loss-tmo=60: Keep retrying for 60 seconds before giving up
-	// --keep-alive-tmo=5: Send keepalive every 5 seconds to detect dead connections
+	// --keep-alive-tmo=5: Request a five-second keep-alive timeout
 	// --nr-io-queues: Number of I/O queues (default 4; configurable via StorageClass)
 	// --queue-size: Queue depth per I/O queue (kernel default 127; configurable via StorageClass)
-	connectArgs := []string{
-		"connect",
-		"-t", params.transport,
-		"-n", params.nqn,
-		"-a", params.server,
-		"-s", params.port,
-		"--reconnect-delay=2",
-		"--ctrl-loss-tmo=60",
-		"--keep-alive-tmo=5",
-	}
-
-	if params.nrIOQueues != "" {
-		connectArgs = append(connectArgs, "--nr-io-queues="+params.nrIOQueues)
-		klog.V(4).Infof("Using custom nr-io-queues=%s for NVMe-oF connection", params.nrIOQueues)
-	} else {
-		connectArgs = append(connectArgs, "--nr-io-queues=4") // default
-	}
-
-	if params.queueSize != "" {
-		connectArgs = append(connectArgs, "--queue-size="+params.queueSize)
-		klog.V(4).Infof("Using custom queue-size=%s for NVMe-oF connection", params.queueSize)
-	}
+	connectArgs := nvmeConnectArguments(params)
 
 	connectCmd := cmdexec.CommandContext(connectCtx, "nvme", connectArgs...)
 	output, err := connectCmd.CombinedOutput()
+	if connectCtx.Err() != nil {
+		return connectCtx.Err()
+	}
 	if err != nil {
 		// Check if already connected (this is success, not an error)
 		if strings.Contains(string(output), "already connected") {
@@ -114,6 +113,35 @@ func (s *NodeService) attemptNVMeConnect(ctx context.Context, params *nvmeOFConn
 	}
 
 	return nil
+}
+
+func nvmeConnectArguments(params *nvmeOFConnectionParams) []string {
+	server := params.server
+	if params.connectServer != "" {
+		server = params.connectServer
+	}
+	connectArgs := []string{
+		"connect",
+		"-t", params.transport,
+		"-n", params.nqn,
+		"-a", server,
+		"-s", params.port,
+		"--reconnect-delay=" + params.policy.argument(nvmeReconnectDelayKey, "2"),
+		"--ctrl-loss-tmo=" + params.policy.argument(nvmeCtrlLossKey, "60"),
+		"--keep-alive-tmo=" + params.policy.argument(nvmeKeepAliveKey, "5"),
+	}
+
+	if params.nrIOQueues != "" {
+		connectArgs = append(connectArgs, "--nr-io-queues="+params.nrIOQueues)
+	} else {
+		connectArgs = append(connectArgs, "--nr-io-queues=4") // default
+	}
+
+	if params.queueSize != "" {
+		connectArgs = append(connectArgs, "--queue-size="+params.queueSize)
+	}
+
+	return connectArgs
 }
 
 // isRetryableNVMeConnectError determines if an NVMe connect error is transient
@@ -164,8 +192,15 @@ func (s *NodeService) disconnectNVMeOF(ctx context.Context, nqn string) error {
 	}
 
 	// Keep controller teardown mutually exclusive with controller registration.
-	s.nvmeLifecycleMu.Lock()
-	defer s.nvmeLifecycleMu.Unlock()
+	unlock, lockErr := s.nvmeLifecycleLocks.lock(ctx, "registry")
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+
+	if err := s.checkNVMeTeardownUsers(ctx, nqn); err != nil {
+		return err
+	}
 
 	klog.V(4).Infof("Disconnecting from NVMe-oF target: %s", nqn)
 
@@ -230,12 +265,12 @@ func waitForNVMeNQNRemovalAt(ctx context.Context, sysClassPath, nqn string, time
 // nvmeNQNPresent checks exact subsystem identities rather than relying on
 // ephemeral controller numbers such as nvme4.
 func nvmeNQNPresent(sysClassPath, nqn string) (bool, error) {
+	if nqn == "" {
+		return false, ErrNVMeEmptyNQN
+	}
 	entries, err := os.ReadDir(sysClassPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
+		return false, fmt.Errorf("%w: %w", ErrNVMeDiscoveryUnknown, err)
 	}
 
 	for _, entry := range entries {
@@ -244,14 +279,11 @@ func nvmeNQNPresent(sysClassPath, nqn string) (bool, error) {
 			continue
 		}
 
-		data, readErr := os.ReadFile(filepath.Join(sysClassPath, name, "subsysnqn")) //nolint:gosec // fixed sysfs file below a validated controller name
+		identity, readErr := readNVMeControllerNQN(sysClassPath, name)
 		if readErr != nil {
-			if os.IsNotExist(readErr) {
-				continue
-			}
 			return false, readErr
 		}
-		if strings.TrimSpace(string(data)) == nqn {
+		if identity == nqn {
 			return true, nil
 		}
 	}

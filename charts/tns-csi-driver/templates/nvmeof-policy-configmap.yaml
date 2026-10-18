@@ -1,0 +1,11 @@
+{{- if .Values.node.nvmeofPolicy }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tns-csi-driver.fullname" . }}-nvmeof-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tns-csi-driver.labels" . | nindent 4 }}
+data:
+  nvmeof-policy.json: {{ .Values.node.nvmeofPolicy | toJson | quote }}
+{{- end }}

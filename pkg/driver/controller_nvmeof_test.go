@@ -1197,6 +1197,24 @@ func TestCreateNVMeOFVolumeQueueParams(t *testing.T) {
 		name          string
 	}{
 		{
+			name: "modern policy survives the public create finalizer",
+			extraParams: map[string]string{
+				nvmeReconnectDelayKey: "3", nvmeCtrlLossKey: "1800", nvmeKeepAliveKey: "10",
+				nvmeMaxSectorsKey: "1024", nvmeReadAheadKey: "0", nvmeIOQueuesKey: "8", nvmeQueueSizeKey: "256",
+			},
+			checkResponse: func(t *testing.T, resp *csi.CreateVolumeResponse) {
+				t.Helper()
+				for _, key := range nvmePolicyKeys {
+					if _, present := resp.Volume.VolumeContext[key]; !present {
+						t.Fatalf("public create lost %s", key)
+					}
+				}
+				if resp.Volume.VolumeContext[nvmeReadAheadKey] != "0" {
+					t.Fatal("public create lost explicit zero readahead")
+				}
+			},
+		},
+		{
 			name: "queue params propagated to volumeContext",
 			extraParams: map[string]string{
 				"nvmeof.nr-io-queues": "16",
@@ -1274,7 +1292,7 @@ func TestCreateNVMeOFVolumeQueueParams(t *testing.T) {
 			}
 
 			controller := NewControllerService(mockClient, NewNodeRegistry(), "")
-			resp, err := controller.createNVMeOFVolume(ctx, req)
+			resp, err := controller.CreateVolume(ctx, req)
 			if err != nil {
 				t.Fatalf("createNVMeOFVolume() unexpected error: %v", err)
 			}

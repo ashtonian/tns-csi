@@ -126,6 +126,9 @@ func mountpointToDatasetID(mountpoint string) string {
 // Note: Volume ID is now just the volume name (CSI spec compliant, max 128 bytes).
 // All metadata is passed via VolumeContext.
 type VolumeMetadata struct {
+	NVMeOFPolicy      map[string]string
+	NVMeOFTransport   string
+	NVMeOFPort        string
 	Name              string
 	Protocol          string
 	DatasetID         string
@@ -165,6 +168,13 @@ func buildVolumeContext(meta VolumeMetadata) map[string]string {
 			ctx[VolumeContextKeyNFSShareID] = strconv.Itoa(meta.NFSShareID)
 		}
 	case ProtocolNVMeOF:
+		injectNVMePolicyParams(ctx, meta.NVMeOFPolicy)
+		if meta.NVMeOFTransport != "" {
+			ctx["transport"] = meta.NVMeOFTransport
+		}
+		if meta.NVMeOFPort != "" {
+			ctx["port"] = meta.NVMeOFPort
+		}
 		if meta.NVMeOFNQN != "" {
 			ctx[VolumeContextKeyNQN] = meta.NVMeOFNQN
 		}
@@ -349,6 +359,11 @@ func extractVolumeMetadata(volumeID string, dataset *tnsapi.DatasetWithPropertie
 		meta.ISCSIIQN = iscsiIQN.Value
 	}
 
+	if meta.Protocol == ProtocolNVMeOF {
+		if err := restoreNVMeMetadataPolicy(meta, dataset); err != nil {
+			return nil, err
+		}
+	}
 	klog.V(4).Infof("Found volume: %s (dataset=%s, protocol=%s)", volumeID, dataset.ID, meta.Protocol)
 	return meta, nil
 }
@@ -634,6 +649,11 @@ func (s *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, modeErr
 	}
 
+	if protocol == ProtocolNVMeOF {
+		if _, policyErr := validateNVMePolicyParameters(params); policyErr != nil {
+			return nil, status.Error(codes.InvalidArgument, policyErr.Error())
+		}
+	}
 	// Check for idempotency: if volume with same name already exists
 	existingVolume, existingErr := s.checkExistingVolume(ctx, req, params, protocol)
 	if existingErr != nil && !errors.Is(existingErr, ErrVolumeNotFound) {
@@ -641,8 +661,7 @@ func (s *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	}
 	if existingVolume != nil {
 		klog.V(4).Infof("Returning existing volume for idempotency: %s", req.GetName())
-		applyCreateVolumeContext(req, existingVolume, filesystemCheckMode)
-		return existingVolume, nil
+		return s.completeCreateVolume(ctx, req, existingVolume, filesystemCheckMode)
 	}
 
 	// Check for adoption: if volume exists elsewhere (different parentDataset) and can be adopted
@@ -651,8 +670,7 @@ func (s *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 			return nil, err
 		}
 		klog.Infof("Successfully adopted orphaned volume: %s", req.GetName())
-		applyCreateVolumeContext(req, resp, filesystemCheckMode)
-		return resp, nil
+		return s.completeCreateVolume(ctx, req, resp, filesystemCheckMode)
 	}
 
 	// Check if creating from snapshot or volume clone
@@ -660,8 +678,7 @@ func (s *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		if err != nil {
 			return nil, err
 		}
-		applyCreateVolumeContext(req, resp, filesystemCheckMode)
-		return resp, nil
+		return s.completeCreateVolume(ctx, req, resp, filesystemCheckMode)
 	}
 
 	klog.V(4).Infof("Creating volume %s with protocol %s", req.GetName(), protocol)
@@ -670,8 +687,7 @@ func (s *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	if createErr != nil {
 		return nil, createErr
 	}
-	applyCreateVolumeContext(req, resp, filesystemCheckMode)
-	return resp, nil
+	return s.completeCreateVolume(ctx, req, resp, filesystemCheckMode)
 }
 
 func applyCreateVolumeContext(req *csi.CreateVolumeRequest, resp *csi.CreateVolumeResponse, filesystemCheckMode string) {
@@ -1668,6 +1684,11 @@ func (s *ControllerService) checkAndAdoptVolume(ctx context.Context, req *csi.Cr
 	klog.Infof("Found adoptable volume %s (dataset=%s, protocol=%s, adoptable=%v, adoptExisting=%v)",
 		volumeName, dataset.ID, volumeProtocol, volumeAdoptable, adoptExisting)
 
+	if protocol == ProtocolNVMeOF {
+		if policyErr := validateAdoptedNVMePolicy(dataset, params); policyErr != nil {
+			return nil, true, policyErr
+		}
+	}
 	// Handle capacity: expand if requested is larger than existing
 	existingCapacity := int64(0)
 	if capacityProp, ok := props[tnsapi.PropertyCapacityBytes]; ok {

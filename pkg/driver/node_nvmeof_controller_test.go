@@ -125,7 +125,7 @@ func TestNVMeLookupKeepsControllerWithoutRescanning(t *testing.T) {
 }
 
 // A connected controller whose namespace never appears is a stale connection. It must
-// be reported as unhealthy so tryReuseExistingConnection disconnects it at once; "not
+// be reported as unhealthy so reuse refuses it without teardown; "not
 // found" made staging reconnect and wait out the full 60s device timeout first.
 func TestStaleControllerWithoutNamespaceIsUnhealthy(t *testing.T) {
 	useFakeSysBlock(t, map[string]string{}, map[string]string{})

@@ -211,6 +211,10 @@ node:
   # Enable only if you need discovery for multi-path or dynamic target topologies.
   enableNVMeDiscovery: false
 
+  # Optional target-scoped NVMe policy. Empty values preserve existing node args.
+  # See docs/NVME-LIFECYCLE-SAFETY.md for the versioned schema and DNS address pins.
+  nvmeofPolicy: {}
+
   # Maximum concurrent NVMe-oF connect operations per node.
   # Limits contention on the kernel's NVMe subsystem registration lock.
   # Recommended: 3-5. Set to 0 for unlimited (not recommended with >10 volumes per node).

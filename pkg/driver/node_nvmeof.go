@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/metrics"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"google.golang.org/grpc/codes"
@@ -49,17 +49,24 @@ const nvmeStagingMetadataSuffix = ".tns-csi-nvmeof"
 // nvmeOFConnectionParams holds validated NVMe-oF connection parameters.
 // With independent subsystems per volume, NSID is always 1.
 type nvmeOFConnectionParams struct {
-	nqn        string
-	server     string
-	transport  string
-	port       string
-	nrIOQueues string // optional: --nr-io-queues flag value
-	queueSize  string // optional: --queue-size flag value
+	policy         nvmePolicy
+	explicitPolicy nvmePolicy
+	connectServer  string
+	nqn            string
+	server         string
+	transport      string
+	port           string
+	nrIOQueues     string // optional: --nr-io-queues flag value
+	queueSize      string // optional: --queue-size flag value
+	addressPins    []netip.Addr
 }
 
 // stageNVMeOFVolume stages an NVMe-oF volume by connecting to the target.
 // With independent subsystems, each volume has its own NQN and NSID is always 1.
 func (s *NodeService) stageNVMeOFVolume(ctx context.Context, req *csi.NodeStageVolumeRequest, volumeContext map[string]string) (*csi.NodeStageVolumeResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	volumeID := req.GetVolumeId()
 	stagingTargetPath := req.GetStagingTargetPath()
 	volumeCapability := req.GetVolumeCapability()
@@ -69,24 +76,27 @@ func (s *NodeService) stageNVMeOFVolume(ctx context.Context, req *csi.NodeStageV
 	if err != nil {
 		return nil, err
 	}
+	isBlockVolume := volumeCapability.GetBlock() != nil
+	if err := s.verifyNVMeStagingSource(ctx, stagingTargetPath, params.nqn, isBlockVolume); err != nil {
+		return nil, nvmeLifecycleError(ctx, "staging path belongs to another or unknown namespace", err)
+	}
 	if err := writeNVMeStagingNQN(stagingTargetPath, params.nqn); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to persist NVMe-oF staging metadata: %v", err)
+		return nil, nvmeLifecycleError(ctx, "failed to persist NVMe-oF staging metadata", err)
 	}
 
-	isBlockVolume := volumeCapability.GetBlock() != nil
 	datasetName := volumeContext["datasetName"]
 	klog.V(4).Infof("Staging NVMe-oF volume %s (block mode: %v): server=%s:%s, NQN=%s, dataset=%s",
 		volumeID, isBlockVolume, params.server, params.port, params.nqn, datasetName)
 
 	// Try to reuse existing connection (idempotent staging)
-	if resp, _, reuseErr := s.tryReuseExistingConnection(ctx, params, volumeID, stagingTargetPath, volumeCapability, isBlockVolume, volumeContext); reuseErr != nil {
+	if resp, reused, reuseErr := s.tryReuseExistingConnection(ctx, params, volumeID, stagingTargetPath, volumeCapability, isBlockVolume, volumeContext); reuseErr != nil {
 		return nil, reuseErr
-	} else if resp != nil {
+	} else if reused {
 		return resp, nil
 	}
 
 	// Check if nvme-cli is installed
-	if checkErr := s.checkNVMeCLI(ctx); checkErr != nil {
+	if checkErr := s.nvmeOperations().checkCLI(ctx); checkErr != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "nvme-cli not available: %v", checkErr)
 	}
 
@@ -105,9 +115,7 @@ func (s *NodeService) stageNVMeOFVolume(ctx context.Context, req *csi.NodeStageV
 		}()
 	case <-ctx.Done():
 		metrics.NVMeConnectDoneWaiting()
-		return nil, status.Errorf(codes.DeadlineExceeded,
-			"timed out waiting for NVMe-oF connect semaphore (max concurrent: %d): %v",
-			cap(s.nvmeConnectSem), ctx.Err())
+		return nil, status.FromContextError(ctx.Err()).Err()
 	}
 	klog.V(4).Infof("Acquired NVMe-oF connect semaphore for NQN: %s", params.nqn)
 
@@ -116,221 +124,98 @@ func (s *NodeService) stageNVMeOFVolume(ctx context.Context, req *csi.NodeStageV
 }
 
 // tryReuseExistingConnection attempts to reuse an existing NVMe-oF connection.
-// Returns the response if successful, or nil if no existing connection found.
 // With independent subsystems, we simply check if the device for this NQN exists.
-func (s *NodeService) tryReuseExistingConnection(ctx context.Context, params *nvmeOFConnectionParams, volumeID, stagingTargetPath string, volumeCapability *csi.VolumeCapability, isBlockVolume bool, volumeContext map[string]string) (resp *csi.NodeStageVolumeResponse, devicePath string, err error) {
-	// With independent subsystems, NSID is always 1
+func (s *NodeService) tryReuseExistingConnection(ctx context.Context, params *nvmeOFConnectionParams, volumeID, stagingTargetPath string, volumeCapability *csi.VolumeCapability, isBlockVolume bool, volumeContext map[string]string) (*csi.NodeStageVolumeResponse, bool, error) {
 	devicePath, findErr := s.findNVMeDeviceByNQN(ctx, params.nqn)
-
-	// Check if we found an unhealthy device (stale connection from previous run)
-	// This is different from "not found" - we need to disconnect it before reconnecting
-	if errors.Is(findErr, ErrNVMeDeviceUnhealthy) {
-		klog.Warningf("Found stale NVMe connection for NQN %s (unhealthy device) - disconnecting before reconnect", params.nqn)
-		if disconnectErr := s.disconnectNVMeOF(ctx, params.nqn); disconnectErr != nil {
-			klog.Warningf("Failed to disconnect stale NVMe-oF connection: %v", disconnectErr)
-		}
-		// Wait for cleanup
-		time.Sleep(2 * time.Second)
-		return nil, "", nil
+	if errors.Is(findErr, ErrNVMeDeviceNotFound) {
+		return nil, false, nil
 	}
-
-	if findErr != nil || devicePath == "" {
-		// Device not found is expected when not previously connected - return nil to try other methods
-		return nil, "", nil //nolint:nilerr // intentionally swallowing "device not found" as this is expected
+	if findErr != nil {
+		return nil, false, nvmeLifecycleError(ctx, "cannot reuse NVMe namespace", findErr)
 	}
-
-	klog.V(4).Infof("NVMe-oF device already connected at %s for NQN=%s - checking if connection is healthy",
-		devicePath, params.nqn)
-
-	// Rescan the namespace to ensure we have fresh data from the target
-	if rescanErr := s.rescanNVMeNamespace(ctx, devicePath); rescanErr != nil {
-		klog.Warningf("Failed to rescan NVMe namespace %s: %v (continuing anyway)", devicePath, rescanErr)
+	if devicePath == "" {
+		return nil, false, nvmeLifecycleError(ctx, "cannot establish NVMe identity", ErrNVMeDiscoveryUnknown)
 	}
-
-	// Verify the existing connection is healthy by checking device size
-	// A stale connection may have the device file but report zero size
-	if healthy := s.verifyDeviceHealthy(ctx, devicePath); !healthy {
-		klog.Warningf("Existing NVMe device %s appears stale (zero size) - disconnecting to force reconnect", devicePath)
-		if disconnectErr := s.disconnectNVMeOF(ctx, params.nqn); disconnectErr != nil {
-			klog.Warningf("Failed to disconnect stale NVMe-oF connection: %v", disconnectErr)
-		}
-		// Return nil to trigger a full reconnect
-		return nil, "", nil
+	ops := s.nvmeOperations()
+	if err := verifyNVMeNQN(devicePath, params.nqn); err != nil {
+		return nil, false, nvmeLifecycleError(ctx, "namespace identity cannot be verified", err)
 	}
-
-	klog.V(4).Infof("Existing NVMe-oF device %s is healthy - reusing connection (idempotent)", devicePath)
-
-	// Proceed directly to staging with the existing device
-	resp, err = s.stageNVMeDevice(ctx, volumeID, devicePath, stagingTargetPath, volumeCapability, isBlockVolume, volumeContext)
-	if err != nil {
-		klog.Errorf("Failed to stage existing NVMe device: %v", err)
-		return nil, devicePath, err
+	if err := ops.rescan(ctx, devicePath); err != nil {
+		return nil, false, nvmeLifecycleError(ctx, "namespace rescan failed", err)
 	}
-	return resp, devicePath, nil
+	if err := verifyNVMeNQN(devicePath, params.nqn); err != nil {
+		return nil, false, nvmeLifecycleError(ctx, "namespace identity changed after rescan", err)
+	}
+	if err := s.prepareNVMePolicy(ctx, volumeID, devicePath, stagingTargetPath, params); err != nil {
+		return nil, false, nvmeLifecycleError(ctx, "NVMe policy could not be enforced after rescan", err)
+	}
+	if len(params.policy.parameters()) > 0 {
+		klog.V(4).Info("Reusing NVMe connection; connection-only policy takes effect on the next normal connection creation")
+	}
+	if err := s.verifyDeviceReady(ctx, devicePath); err != nil {
+		return nil, false, nvmeLifecycleError(ctx, "namespace capacity unavailable", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, status.FromContextError(err).Err()
+	}
+	resp, err := ops.stage(ctx, volumeID, devicePath, stagingTargetPath, volumeCapability, isBlockVolume, volumeContext)
+	return resp, true, err
 }
 
-// verifyDeviceHealthy checks if an NVMe device is healthy by verifying it reports a non-zero size.
-// Returns true if the device is healthy, false if it appears stale or broken.
-func (s *NodeService) verifyDeviceHealthy(ctx context.Context, devicePath string) bool {
-	const (
-		maxAttempts   = 5                      // Quick check, don't wait too long
-		checkInterval = 500 * time.Millisecond // Half second between checks
-	)
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		sizeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		cmd := cmdexec.CommandContext(sizeCtx, "blockdev", "--getsize64", devicePath)
-		output, err := cmd.CombinedOutput()
-		cancel()
-
-		if err == nil {
-			sizeStr := strings.TrimSpace(string(output))
-			if size, parseErr := strconv.ParseInt(sizeStr, 10, 64); parseErr == nil && size > 0 {
-				klog.V(4).Infof("Device %s health check passed: size=%d bytes (attempt %d)", devicePath, size, attempt)
-				return true
-			}
-			klog.V(4).Infof("Device %s health check attempt %d/%d: size=%s (zero)", devicePath, attempt, maxAttempts, sizeStr)
-		} else {
-			klog.V(4).Infof("Device %s health check attempt %d/%d failed: %v", devicePath, attempt, maxAttempts, err)
-		}
-
-		if attempt < maxAttempts {
-			time.Sleep(checkInterval)
-		}
-	}
-
-	klog.V(4).Infof("Device %s failed health check after %d attempts (size remained zero)", devicePath, maxAttempts)
-	return false
-}
-
-// connectAndStageDevice connects to the NVMe-oF target and stages the device.
-// If the device doesn't appear after the first attempt, it will disconnect and retry.
-// Uses aggressive retry logic similar to democratic-csi to handle transient failures:
-// 1. Connect to target
-// 2. Wait for subsystem state to become "live" (blocking)
-// 3. Wait for device path to appear
-// 4. Retry entire cycle if any step fails.
-//
-// IMPORTANT: This function uses its own internal timeouts rather than the parent context
-// for retry operations. This prevents the CSI sidecar's context deadline from causing
-// cascading failures in our retry loop. The parent context is only checked at the start
-// of each attempt to allow graceful termination.
-func (s *NodeService) connectAndStageDevice(ctx context.Context, params *nvmeOFConnectionParams, volumeID, stagingTargetPath string, volumeCapability *csi.VolumeCapability, isBlockVolume bool, volumeContext map[string]string, datasetName string) (*csi.NodeStageVolumeResponse, error) {
-	const (
-		stateWaitTimeout  = 60 * time.Second // Wait for subsystem to become "live"
-		deviceWaitTimeout = 60 * time.Second // Wait for device path to appear
-		maxConnectRetries = 10               // Try up to 10 connect cycles
-		retryDelay        = 2 * time.Second  // Delay between retries
-	)
-
+func (s *NodeService) verifyDeviceReady(ctx context.Context, devicePath string) error {
+	const maxAttempts = 5
+	ops := s.nvmeOperations()
 	var lastErr error
-	for attempt := 1; attempt <= maxConnectRetries; attempt++ {
-		// Check if parent context is canceled before starting new attempt.
-		// This allows graceful termination while not letting context cancellation
-		// cascade into our internal operations.
-		select {
-		case <-ctx.Done():
-			klog.Warningf("Parent context canceled, stopping NVMe-oF connection attempts at attempt %d: %v", attempt, ctx.Err())
-			if lastErr != nil {
-				return nil, status.Errorf(codes.DeadlineExceeded, "NVMe-oF connection canceled after %d attempts (last error: %v)", attempt-1, lastErr)
-			}
-			return nil, status.Errorf(codes.DeadlineExceeded, "NVMe-oF connection canceled: %v", ctx.Err())
-		default:
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-
-		if attempt > 1 {
-			klog.Infof("Retrying NVMe-oF connection (attempt %d/%d) for NQN: %s", attempt, maxConnectRetries, params.nqn)
+		size, err := ops.readSize(ctx, devicePath)
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-
-		// Use a detached context for internal operations to prevent the CSI sidecar's
-		// context deadline from causing cascading failures in our retry loop.
-		// Each operation (connect, state wait, device wait) has its own timeout.
-		// This is intentional - we check ctx.Done() at the start of each attempt instead.
-		opCtx := context.Background()
-
-		// Step 1: Connect to NVMe-oF target
-		//nolint:contextcheck // Intentionally using detached context - see comment above
-		if connectErr := s.connectNVMeOFTarget(opCtx, params); connectErr != nil {
-			lastErr = connectErr
-			klog.Warningf("NVMe-oF connect attempt %d failed: %v", attempt, connectErr)
-			if attempt < maxConnectRetries {
-				time.Sleep(retryDelay)
-			}
-			continue
+		if err == nil && size > 0 {
+			return nil
 		}
-
-		// Step 2: Wait for subsystem to become "live" (critical for reliability)
-		// This is what democratic-csi does - it blocks until state == "live" before looking for devices
-		klog.V(4).Infof("Waiting for subsystem %s to become live...", params.nqn)
-		//nolint:contextcheck // Intentionally using detached context - see comment above
-		if stateErr := waitForSubsystemLive(opCtx, params.nqn, stateWaitTimeout); stateErr != nil {
-			lastErr = stateErr
-			klog.Warningf("NVMe-oF subsystem %s did not become live on attempt %d: %v", params.nqn, attempt, stateErr)
-
-			// Disconnect before retry
-			//nolint:contextcheck // Intentionally using detached context - see comment above
-			if disconnectErr := s.disconnectNVMeOF(opCtx, params.nqn); disconnectErr != nil {
-				klog.Warningf("Failed to disconnect after subsystem state timeout: %v", disconnectErr)
-			}
-
-			if attempt < maxConnectRetries {
-				klog.V(4).Infof("Waiting %v before retry...", retryDelay)
-				time.Sleep(retryDelay)
-			}
-			continue
-		}
-
-		// Step 3: Wait for device path to appear (NSID is always 1 with independent subsystems)
-		//nolint:contextcheck // Intentionally using detached context - see comment above
-		devicePath, err := s.waitForNVMeDevice(opCtx, params.nqn, deviceWaitTimeout)
-		if err == nil {
-			klog.Infof("NVMe-oF device connected at %s (NQN: %s, dataset: %s) on attempt %d",
-				devicePath, params.nqn, datasetName, attempt)
-
-			// Try staging - if device becomes unavailable during staging, retry the whole connection
-			// Use original context for staging since that's the actual CSI operation
-			stageResp, stageErr := s.stageNVMeDevice(ctx, volumeID, devicePath, stagingTargetPath, volumeCapability, isBlockVolume, volumeContext)
-			if stageErr == nil {
-				return stageResp, nil
-			}
-
-			// Check if this is a retryable error (device disappeared during staging)
-			if status.Code(stageErr) == codes.Unavailable {
-				lastErr = stageErr
-				klog.Warningf("NVMe-oF staging failed on attempt %d (device unstable): %v", attempt, stageErr)
-				// Disconnect and retry - the device may have become stale
-				//nolint:contextcheck // Intentionally using detached context
-				if disconnectErr := s.disconnectNVMeOF(opCtx, params.nqn); disconnectErr != nil {
-					klog.Warningf("Failed to disconnect after staging failure: %v", disconnectErr)
-				}
-				if attempt < maxConnectRetries {
-					time.Sleep(retryDelay)
-				}
-				continue
-			}
-
-			// Non-retryable error - fail immediately
-			return nil, stageErr
-		}
-
 		lastErr = err
-		klog.Warningf("NVMe-oF device wait failed on attempt %d: %v", attempt, err)
-
-		// Disconnect before retry (or final cleanup)
-		//nolint:contextcheck // Intentionally using detached context - see comment above
-		if disconnectErr := s.disconnectNVMeOF(opCtx, params.nqn); disconnectErr != nil {
-			klog.Warningf("Failed to disconnect NVMe-oF after device wait failure: %v", disconnectErr)
+		if lastErr == nil {
+			lastErr = ErrNVMeDeviceUnhealthy
 		}
-
-		// Delay before retry to let things settle
-		if attempt < maxConnectRetries {
-			klog.V(4).Infof("Waiting %v before retry...", retryDelay)
-			time.Sleep(retryDelay)
+		if attempt < maxAttempts {
+			if err := waitNVMeContext(ctx, 500*time.Millisecond); err != nil {
+				return err
+			}
 		}
 	}
+	return lastErr
+}
 
-	return nil, status.Errorf(codes.Internal, "Failed to find NVMe device after %d connection attempts (NQN: %s): %v",
-		maxConnectRetries, params.nqn, lastErr)
+// connectAndStageDevice retains uncertain connections for a later CSI retry.
+func (s *NodeService) connectAndStageDevice(ctx context.Context, params *nvmeOFConnectionParams, volumeID, stagingTargetPath string, volumeCapability *csi.VolumeCapability, isBlockVolume bool, volumeContext map[string]string, _ string) (*csi.NodeStageVolumeResponse, error) {
+	ops := s.nvmeOperations()
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	if err := ops.connect(ctx, params); err != nil {
+		return nil, nvmeLifecycleError(ctx, "NVMe connect failed", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	if err := ops.waitLive(ctx, params.nqn, 60*time.Second); err != nil {
+		return nil, nvmeLifecycleError(ctx, "NVMe subsystem not ready", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	devicePath, err := ops.waitDevice(ctx, params.nqn, 60*time.Second)
+	if err != nil {
+		return nil, nvmeLifecycleError(ctx, "NVMe namespace not ready", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	return ops.stage(ctx, volumeID, devicePath, stagingTargetPath, volumeCapability, isBlockVolume, volumeContext)
 }
 
 // validateNVMeOFParams validates and extracts NVMe-oF connection parameters from volume context.
@@ -351,10 +236,42 @@ func (s *NodeService) validateNVMeOFParams(volumeContext map[string]string) (*nv
 
 	// Default values
 	if params.transport == "" {
-		params.transport = "tcp"
+		params.transport = nvmeTransportTCP
 	}
 	if params.port == "" {
 		params.port = "4420"
+	}
+
+	explicit, policyErr := parseNVMePolicy(volumeContext, false)
+	if policyErr != nil {
+		return nil, status.Error(codes.InvalidArgument, policyErr.Error())
+	}
+	profile, pins, profileErr := s.nvmeNodePolicy.resolve(params)
+	if profileErr != nil {
+		return nil, status.Error(codes.FailedPrecondition, profileErr.Error())
+	}
+	params.explicitPolicy = explicit
+	params.policy = mergeNVMePolicies(explicit, profile)
+	params.nrIOQueues = params.policy.legacy[nvmeIOQueuesKey]
+	params.queueSize = params.policy.legacy[nvmeQueueSizeKey]
+	if len(params.policy.values) > 0 || len(pins) > 0 {
+		if params.transport != nvmeTransportTCP {
+			return nil, status.Error(codes.FailedPrecondition, "scoped NVMe policy requires TCP")
+		}
+		if len(pins) == 0 {
+			server, canonicalErr := canonicalNVMeServer(params.server)
+			address, parseErr := netip.ParseAddr(server)
+			if canonicalErr != nil || parseErr != nil {
+				return nil, status.Error(codes.FailedPrecondition, "hostname policy requires a node profile with pinned numeric addresses")
+			}
+			pins = []netip.Addr{address.Unmap()}
+		}
+		port, portErr := strconv.ParseUint(params.port, 10, 16)
+		if portErr != nil || port == 0 || strconv.FormatUint(port, 10) != params.port {
+			return nil, status.Error(codes.InvalidArgument, "scoped NVMe policy requires a canonical decimal TCP port")
+		}
+		params.addressPins = pins
+		params.connectServer = pins[0].String()
 	}
 
 	return params, nil
@@ -362,6 +279,19 @@ func (s *NodeService) validateNVMeOFParams(volumeContext map[string]string) (*nv
 
 // stageNVMeDevice stages an NVMe device as either block or filesystem volume.
 func (s *NodeService) stageNVMeDevice(ctx context.Context, volumeID, devicePath, stagingTargetPath string, volumeCapability *csi.VolumeCapability, isBlockVolume bool, volumeContext map[string]string) (*csi.NodeStageVolumeResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	params, err := s.validateNVMeOFParams(volumeContext)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyNVMeNQN(devicePath, params.nqn); err != nil {
+		return nil, nvmeLifecycleError(ctx, "cannot verify staging namespace", err)
+	}
+	if err := s.prepareNVMePolicy(ctx, volumeID, devicePath, stagingTargetPath, params); err != nil {
+		return nil, nvmeLifecycleError(ctx, "NVMe policy could not be enforced before staging", err)
+	}
 	// For filesystem volumes, wait for device to be fully initialized.
 	if !isBlockVolume {
 		// First, wait for device to report non-zero size (indicates device is initialized)
@@ -373,22 +303,33 @@ func (s *NodeService) stageNVMeDevice(ctx context.Context, volumeID, devicePath,
 		if err := forceDeviceRescan(ctx, devicePath); err != nil {
 			klog.Warningf("Device rescan warning for %s: %v (continuing anyway)", devicePath, err)
 		}
+		if err := verifyNVMeNQN(devicePath, params.nqn); err != nil {
+			return nil, nvmeLifecycleError(ctx, "namespace changed during staging rescan", err)
+		}
+		if err := s.prepareNVMePolicy(ctx, volumeID, devicePath, stagingTargetPath, params); err != nil {
+			return nil, nvmeLifecycleError(ctx, "NVMe policy could not be enforced after staging rescan", err)
+		}
 
 		// Additional stabilization delay to ensure metadata is readable after rescan
 		const deviceMetadataDelay = 2 * time.Second
 		klog.V(4).Infof("Waiting %v for device %s metadata to stabilize after rescan", deviceMetadataDelay, devicePath)
-		time.Sleep(deviceMetadataDelay)
+		if err := waitNVMeContext(ctx, deviceMetadataDelay); err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
 		klog.V(4).Infof("Device metadata stabilization delay complete for %s", devicePath)
 	}
 
 	if isBlockVolume {
+		if err := s.verifyNVMeStagingSource(ctx, stagingTargetPath, params.nqn, true); err != nil {
+			return nil, nvmeLifecycleError(ctx, "block staging source cannot be verified", err)
+		}
 		return s.stageBlockDevice(devicePath, stagingTargetPath)
 	}
 	return s.formatAndMountNVMeDevice(ctx, volumeID, devicePath, stagingTargetPath, volumeCapability, volumeContext)
 }
 
 // unstageNVMeOFVolume unstages an NVMe-oF volume by disconnecting from the target.
-// With independent subsystems, we always disconnect when unstaging (no shared subsystem check needed).
+// CSI unpublish ordering is required; observed users or uncertain identity refuse teardown.
 func (s *NodeService) unstageNVMeOFVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest, volumeContext map[string]string) (*csi.NodeUnstageVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
 	stagingTargetPath := req.GetStagingTargetPath()
@@ -424,20 +365,38 @@ func (s *NodeService) unstageNVMeOFVolume(ctx context.Context, req *csi.NodeUnst
 		return nil, status.Errorf(codes.Internal, "failed to persist NVMe-oF staging metadata before unmount: %v", err)
 	}
 
-	// Check if mounted and unmount if necessary
-	mounted, err := mount.IsMounted(ctx, stagingTargetPath)
+	entry, mounted, err := lookupMountedEntry(ctx, stagingTargetPath)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to check if staging path is mounted: %v", err)
+		return nil, nvmeLifecycleError(ctx, "cannot verify staging mount", err)
+	}
+	if mounted {
+		if err := verifyNVMeNQN(entry.Source, nqn); err != nil {
+			return nil, nvmeLifecycleError(ctx, "staging source identity conflict", err)
+		}
+	} else if info, statErr := os.Lstat(stagingTargetPath); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		device, resolveErr := filepath.EvalSymlinks(stagingTargetPath)
+		if resolveErr != nil {
+			present, presenceErr := nvmeNQNPresent(sysClassNVMePath, nqn)
+			if presenceErr != nil || present {
+				return nil, nvmeLifecycleError(ctx, "cannot verify raw staging source", errors.Join(resolveErr, presenceErr))
+			}
+		} else if err := verifyNVMeNQN(device, nqn); err != nil {
+			return nil, nvmeLifecycleError(ctx, "raw staging source identity conflict", err)
+		}
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return nil, nvmeLifecycleError(ctx, "cannot inspect staging path", statErr)
 	}
 
 	if mounted {
 		klog.V(4).Infof("Unmounting staging path: %s", stagingTargetPath)
-		if err := mount.Unmount(ctx, stagingTargetPath); err != nil {
+		if err := s.nvmeOperations().unmount(ctx, stagingTargetPath); err != nil {
 			return nil, status.Errorf(codes.Internal, "Failed to unmount staging path: %v", err)
 		}
 	}
 
-	// With independent subsystems, always disconnect (no shared subsystem to worry about)
+	if err := s.checkNVMeTeardownUsers(ctx, nqn); err != nil {
+		return nil, nvmeLifecycleError(ctx, "cannot safely unstage NVMe subsystem", err)
+	}
 	klog.V(4).Infof("Disconnecting NVMe-oF subsystem for volume %s: NQN=%s", volumeID, nqn)
 	if err := s.disconnectNVMeOF(ctx, nqn); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to disconnect NVMe-oF volume %s (NQN %s): %v", volumeID, nqn, err)
@@ -483,7 +442,24 @@ func writeNVMeStagingNQN(stagingTargetPath, nqn string) error {
 	if err := os.MkdirAll(filepath.Dir(stagingTargetPath), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(nvmeStagingMetadataPath(stagingTargetPath), []byte(nqn+"\n"), 0o600)
+	path := nvmeStagingMetadataPath(stagingTargetPath)
+	file, err := createNVMeMetadataFile(path)
+	if errors.Is(err, os.ErrExist) {
+		retained, readErr := readNVMeStagingNQN(stagingTargetPath)
+		if readErr != nil {
+			return readErr
+		}
+		if retained != nqn {
+			return fmt.Errorf("%w: retained NQN differs from requested NQN", ErrNVMeIdentityConflict)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.WriteString(nqn + "\n")
+	syncErr := file.Sync()
+	return errors.Join(writeErr, syncErr, file.Close(), syncNVMeMetadataDirectory(filepath.Dir(path)))
 }
 
 func readNVMeStagingNQN(stagingTargetPath string) (string, error) {
@@ -534,6 +510,16 @@ func (s *NodeService) getStagedNVMeDevicePath(ctx context.Context, stagingTarget
 
 // formatAndMountNVMeDevice formats (if needed) and mounts an NVMe device.
 func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, devicePath, stagingTargetPath string, volumeCapability *csi.VolumeCapability, volumeContext map[string]string) (*csi.NodeStageVolumeResponse, error) {
+	params, parameterErr := s.validateNVMeOFParams(volumeContext)
+	if parameterErr != nil {
+		return nil, parameterErr
+	}
+	if err := verifyNVMeNQN(devicePath, params.nqn); err != nil {
+		return nil, nvmeLifecycleError(ctx, "cannot verify namespace before filesystem use", err)
+	}
+	if err := s.prepareNVMePolicy(ctx, volumeID, devicePath, stagingTargetPath, params); err != nil {
+		return nil, nvmeLifecycleError(ctx, "cannot enforce policy before filesystem use", err)
+	}
 	datasetName := volumeContext["datasetName"]
 	nqn := volumeContext["nqn"]
 	klog.V(4).Infof("Formatting and mounting NVMe device: device=%s, path=%s, volume=%s, dataset=%s, NQN=%s",
@@ -544,6 +530,9 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 		return nil, mountErr
 	}
 	if mounted {
+		if err := s.verifyNVMeStagingSource(ctx, stagingTargetPath, params.nqn, false); err != nil {
+			return nil, nvmeLifecycleError(ctx, "mounted staging source cannot be verified", err)
+		}
 		klog.V(4).Infof("Staging path %s is already mounted", stagingTargetPath)
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
@@ -580,11 +569,19 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 		// Reduced delay with independent subsystems (no NSID cache pollution)
 		const cloneStabilizationDelay = 5 * time.Second
 		klog.V(4).Infof("Waiting %v for cloned volume %s filesystem metadata to stabilize", cloneStabilizationDelay, devicePath)
-		time.Sleep(cloneStabilizationDelay)
+		if err := waitNVMeContext(ctx, cloneStabilizationDelay); err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
 		klog.V(4).Infof("Clone stabilization delay complete for %s", devicePath)
 	}
 
 	// Check if device needs formatting (will detect existing filesystem or format if needed)
+	if err := verifyNVMeNQN(devicePath, params.nqn); err != nil {
+		return nil, nvmeLifecycleError(ctx, "namespace changed before filesystem probe", err)
+	}
+	if err := s.prepareNVMePolicy(ctx, volumeID, devicePath, stagingTargetPath, params); err != nil {
+		return nil, nvmeLifecycleError(ctx, "cannot enforce policy before filesystem probe", err)
+	}
 	newlyFormatted, formatErr := s.handleDeviceFormatting(ctx, volumeID, devicePath, fsType, datasetName, nqn, isClone)
 	if formatErr != nil {
 		return nil, formatErr

@@ -121,7 +121,7 @@ func TestWaitForNVMeNQNRemoval(t *testing.T) {
 	removed := make(chan error, 1)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		removed <- os.Remove(nqnPath)
+		removed <- os.RemoveAll(filepath.Dir(nqnPath))
 	}()
 
 	err := waitForNVMeNQNRemovalAt(context.Background(), sysClassPath, "nqn.2026-02.csi.tns:volume", time.Second, 5*time.Millisecond)
@@ -144,7 +144,11 @@ func TestWaitForNVMeNQNRemovalTimesOut(t *testing.T) {
 }
 
 func TestUnstageNVMeOFVolumeReturnsDisconnectFailure(t *testing.T) {
+	const fixtureNQN = "nqn.2026-02.csi.tns:volume"
+	useFakeSysBlock(t, map[string]string{"nvme4": fixtureNQN}, map[string]string{"nvme4n1": "nvme4"})
+	fakeSysClassNVMe(t, map[string]string{"nvme4": fixtureNQN})
 	service := NewNodeService("test-node", nil, true, nil, false, 5)
+	service.isSourceMountedFn = func(context.Context, string) (bool, error) { return false, nil }
 	disconnectErr := errors.New("disconnect failed")
 	service.disconnectNVMeOFFn = func(_ context.Context, _ string) error {
 		return disconnectErr
@@ -183,7 +187,11 @@ func TestUnstageNVMeOFVolumeRejectsUnknownNQN(t *testing.T) {
 }
 
 func TestNVMeStagingMetadataSupportsUnstageRetry(t *testing.T) {
+	const fixtureNQN = "nqn.2026-02.csi.tns:volume"
+	useFakeSysBlock(t, map[string]string{"nvme4": fixtureNQN}, map[string]string{"nvme4n1": "nvme4"})
+	fakeSysClassNVMe(t, map[string]string{"nvme4": fixtureNQN})
 	service := NewNodeService("test-node", nil, true, nil, false, 5)
+	service.isSourceMountedFn = func(context.Context, string) (bool, error) { return false, nil }
 	stagingPath := filepath.Join(t.TempDir(), "globalmount")
 	const nqn = "nqn.2026-02.csi.tns:volume"
 	if err := writeNVMeStagingNQN(stagingPath, nqn); err != nil {

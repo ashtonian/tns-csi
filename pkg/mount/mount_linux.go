@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,12 +58,24 @@ func IsSourceMounted(ctx context.Context, sourcePath string) (bool, error) {
 	if !ok {
 		return false, fmt.Errorf("%w: failed to read metadata for %s", errInvalidSourceDevice, sourcePath)
 	}
+	var rawSources []rawMountSource
+	if info.Mode()&os.ModeCharDevice == 0 {
+		canonical, resolveErr := filepath.EvalSymlinks(sourcePath)
+		if resolveErr != nil {
+			return false, fmt.Errorf("failed to resolve source device: %w", resolveErr)
+		}
+		rawSource, rootErr := rawSourceForMountInfo(canonical, stat.Dev, selfMountInfo)
+		if rootErr != nil {
+			return false, rootErr
+		}
+		rawSources = append(rawSources, rawSource)
+	}
 
 	mountInfo, err := os.Open("/proc/1/mountinfo")
 	if err != nil {
 		return false, fmt.Errorf("failed to open host mount information: %w", err)
 	}
-	mounted, parseErr := isDeviceInMountInfo(unix.Major(stat.Rdev), unix.Minor(stat.Rdev), mountInfo)
+	mounted, parseErr := isDeviceInMountInfo(unix.Major(stat.Rdev), unix.Minor(stat.Rdev), mountInfo, rawSources...)
 	closeErr := mountInfo.Close()
 	if parseErr != nil {
 		return false, parseErr
@@ -73,12 +86,12 @@ func IsSourceMounted(ctx context.Context, sourcePath string) (bool, error) {
 	return mounted, nil
 }
 
-func isDeviceInMountInfo(deviceMajor, deviceMinor uint32, mountInfo io.Reader) (bool, error) {
+func isDeviceInMountInfo(deviceMajor, deviceMinor uint32, mountInfo io.Reader, rawSources ...rawMountSource) (bool, error) {
 	scanner := bufio.NewScanner(mountInfo)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) < 3 {
+		if len(fields) < 6 {
 			return false, fmt.Errorf("%w: entry %q", errInvalidMountInfo, scanner.Text())
 		}
 		deviceNumbers := strings.Split(fields[2], ":")
@@ -95,6 +108,11 @@ func isDeviceInMountInfo(deviceMajor, deviceMinor uint32, mountInfo io.Reader) (
 		}
 		if major == uint64(deviceMajor) && minor == uint64(deviceMinor) {
 			return true, nil
+		}
+		for _, raw := range rawSources {
+			if major == uint64(raw.major) && minor == uint64(raw.minor) && unescapeMountField(fields[3]) == raw.root {
+				return true, nil
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

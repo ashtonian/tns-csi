@@ -21,6 +21,8 @@ import (
 
 // Config contains the configuration for the driver.
 type Config struct {
+	NVMeNodeProfilePath       string
+	NVMeNodePolicy            *NVMeNodePolicy
 	DriverName                string
 	Version                   string
 	NodeID                    string
@@ -53,6 +55,11 @@ type Driver struct {
 
 // NewDriver creates a new driver instance.
 func NewDriver(cfg Config) (*Driver, error) {
+	var policyErr error
+	cfg, policyErr = loadNVMeDriverPolicy(cfg)
+	if policyErr != nil {
+		return nil, policyErr
+	}
 	klog.V(4).Infof("Creating new driver with config: DriverName=%s, NodeID=%s, Endpoint=%s, APIURL=%s, MetricsAddr=%s, TestMode=%v, SkipTLSVerify=%v",
 		cfg.DriverName, cfg.NodeID, cfg.Endpoint, cfg.APIURL, cfg.MetricsAddr, cfg.TestMode, cfg.SkipTLSVerify)
 
@@ -69,6 +76,11 @@ func NewDriver(cfg Config) (*Driver, error) {
 // NewDriverWithClient creates a new driver instance with a custom client.
 // This is primarily used for testing with mock clients.
 func NewDriverWithClient(cfg Config, client tnsapi.ClientInterface) (*Driver, error) {
+	var policyErr error
+	cfg, policyErr = loadNVMeDriverPolicy(cfg)
+	if policyErr != nil {
+		return nil, policyErr
+	}
 	klog.V(4).Infof("Creating new driver with custom client")
 
 	d := &Driver{
@@ -83,7 +95,7 @@ func NewDriverWithClient(cfg Config, client tnsapi.ClientInterface) (*Driver, er
 	// Initialize CSI services
 	d.identity = NewIdentityService(cfg.DriverName, cfg.Version)
 	d.controller = NewControllerService(client, nodeRegistry, cfg.ClusterID)
-	d.node = NewNodeService(cfg.NodeID, client, cfg.TestMode, nodeRegistry, cfg.EnableNVMeDiscovery, cfg.MaxConcurrentNVMeConnects)
+	d.node = NewNodeService(cfg.NodeID, client, cfg.TestMode, nodeRegistry, cfg.EnableNVMeDiscovery, cfg.MaxConcurrentNVMeConnects, WithNVMeNodePolicy(cfg.NVMeNodePolicy))
 
 	return d, nil
 }

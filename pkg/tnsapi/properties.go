@@ -101,6 +101,9 @@ const (
 	// PropertyNVMeSubsystemNQN stores the NVMe-oF subsystem NQN (stable identifier).
 	// Value: e.g., "nqn.2024.io.truenas:nvme:pvc-xxx".
 	PropertyNVMeSubsystemNQN = "tns-csi:nvmeof_subsystem_nqn"
+
+	// PropertyNVMePolicy stores optional versioned explicit policy and endpoint provenance.
+	PropertyNVMePolicy = "tns-csi:nvmeof_policy"
 )
 
 // iSCSI-specific properties (future).
@@ -260,6 +263,7 @@ func PropertyNames() []string {
 		PropertyNVMeSubsystemID,
 		PropertyNVMeNamespaceID,
 		PropertyNVMeSubsystemNQN,
+		PropertyNVMePolicy,
 		// iSCSI properties
 		PropertyISCSIIQN,
 		PropertyISCSITargetID,

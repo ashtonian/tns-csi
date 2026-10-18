@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -52,25 +51,38 @@ type NodeService struct {
 	needsFormatFn        func(context.Context, string, bool) (bool, error)
 	formatDeviceFn       func(context.Context, string, string, string) error
 	volumeLifecycleLocks keyedMutex
+	nvmeLifecycleLocks   keyedMutex
+	nvmeOps              nvmeLifecycleOperations
+	nvmeNodePolicy       *NVMeNodePolicy
+	nvmePolicyDirectory  string
+	nvmeQueueWriteFn     func(context.Context, string, string, uint64, func() error) error
+	nvmeExpandDeviceFn   func(string) (string, error)
+	nvmeDeviceNumberFn   func(string) (string, error)
 	nodeID               string
-	nvmeLifecycleMu      sync.Mutex
 	testMode             bool
 	enableDiscovery      bool
 }
 
 // NewNodeService creates a new node service.
-func NewNodeService(nodeID string, apiClient tnsapi.ClientInterface, testMode bool, nodeRegistry *NodeRegistry, enableDiscovery bool, maxConcurrentNVMeConnects int) *NodeService {
+func NewNodeService(nodeID string, apiClient tnsapi.ClientInterface, testMode bool, nodeRegistry *NodeRegistry, enableDiscovery bool, maxConcurrentNVMeConnects int, options ...NodeServiceOption) *NodeService {
 	if maxConcurrentNVMeConnects <= 0 {
 		maxConcurrentNVMeConnects = 5
 	}
-	return &NodeService{
-		nodeID:          nodeID,
-		apiClient:       apiClient,
-		testMode:        testMode,
-		nodeRegistry:    nodeRegistry,
-		enableDiscovery: enableDiscovery,
-		nvmeConnectSem:  make(chan struct{}, maxConcurrentNVMeConnects),
+	service := &NodeService{
+		nvmePolicyDirectory: "/var/lib/tns-csi/nvmeof",
+		nodeID:              nodeID,
+		apiClient:           apiClient,
+		testMode:            testMode,
+		nodeRegistry:        nodeRegistry,
+		enableDiscovery:     enableDiscovery,
+		nvmeConnectSem:      make(chan struct{}, maxConcurrentNVMeConnects),
 	}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service
 }
 
 // NodeStageVolume stages a volume to a staging path.
@@ -395,6 +407,12 @@ func (s *NodeService) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	protocol := getProtocolFromVolumeContext(volumeContext)
 
 	klog.V(4).Infof("Publishing volume %s (protocol: %s) to %s", volumeID, protocol, targetPath)
+	unlock, lockErr := s.volumeLifecycleLocks.lock(ctx, volumeID)
+	if lockErr != nil {
+		timer.ObserveError()
+		return nil, status.FromContextError(lockErr).Err()
+	}
+	defer unlock()
 
 	// Publish volume based on protocol
 	switch protocol {
@@ -422,6 +440,12 @@ func (s *NodeService) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		if stagingTargetPath == "" {
 			timer.ObserveError()
 			return nil, status.Errorf(codes.InvalidArgument, "Staging target path is required for %s volumes", protocol)
+		}
+		if protocol == ProtocolNVMeOF {
+			if err := s.prepareNVMePublish(ctx, req); err != nil {
+				timer.ObserveError()
+				return nil, err
+			}
 		}
 
 		// Check volume capability to determine how to publish
@@ -466,6 +490,12 @@ func (s *NodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	targetPath := req.GetTargetPath()
 
 	klog.V(4).Infof("Unmounting volume %s from %s", volumeID, targetPath)
+	unlock, lockErr := s.volumeLifecycleLocks.lock(ctx, volumeID)
+	if lockErr != nil {
+		timer.ObserveError()
+		return nil, status.FromContextError(lockErr).Err()
+	}
+	defer unlock()
 
 	// In test mode, skip actual unmount operations
 	if s.testMode {
@@ -647,7 +677,7 @@ func (s *NodeService) verifyVolumeExists(ctx context.Context, volumeID string) e
 
 // NodeExpandVolume expands a volume on the node.
 // For NFS volumes, no action is needed as the server handles quota changes.
-// For NVMe-oF block volumes, no action is needed.
+// NVMe policy is verified before block success or filesystem resize.
 // For NVMe-oF filesystem volumes, we resize the filesystem.
 func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
 	klog.V(4).Infof("NodeExpandVolume called with request: %+v", req)
@@ -663,6 +693,11 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 
 	volumeID := req.GetVolumeId()
 	volumePath := req.GetVolumePath()
+	unlock, lockErr := s.volumeLifecycleLocks.lock(ctx, volumeID)
+	if lockErr != nil {
+		return nil, status.FromContextError(lockErr).Err()
+	}
+	defer unlock()
 
 	// Check if volume path exists
 	if _, statErr := os.Stat(volumePath); os.IsNotExist(statErr) {
@@ -676,9 +711,12 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 			CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
 		}, nil
 	}
+	if req.GetVolumeCapability().GetBlock() != nil {
+		return s.expandBlockVolume(ctx, req)
+	}
 
 	// Check if the path is mounted
-	_, mounted, err := lookupMountedEntry(ctx, volumePath)
+	entry, mounted, err := lookupMountedEntry(ctx, volumePath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Failed to check if path is mounted: %v", err)
 	}
@@ -698,14 +736,9 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 			CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
 		}, nil
 	}
-
-	// For block protocol volumes (NVMe-oF or iSCSI), check if this is a block or filesystem volume
-	volumeCap := req.GetVolumeCapability()
-	if volumeCap != nil && volumeCap.GetBlock() != nil {
-		klog.Info("Block volume expansion, no filesystem resize needed")
-		return &csi.NodeExpandVolumeResponse{
-			CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
-		}, nil
+	verifyPolicy, policyErr := s.prepareNVMeFilesystemExpand(ctx, req, entry.Source)
+	if policyErr != nil {
+		return nil, policyErr
 	}
 
 	// For filesystem volumes, we need to resize the filesystem
@@ -722,6 +755,9 @@ func (s *NodeService) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	// Resize based on filesystem type
 	if err := resizeFilesystem(ctx, volumePath, fsType); err != nil {
 		return nil, keepStatus(err, codes.Internal, "Failed to resize filesystem")
+	}
+	if err := verifyPolicy(); err != nil {
+		return nil, err
 	}
 
 	klog.V(4).Infof("Resized filesystem for volume %s", volumeID)

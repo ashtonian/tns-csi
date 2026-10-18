@@ -25,9 +25,14 @@ spec:
         {{- with .Values.customLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.customAnnotations }}
+      {{- if or .Values.customAnnotations .Values.node.nvmeofPolicy }}
       annotations:
+        {{- with .Values.customAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.node.nvmeofPolicy }}
+        checksum/nvmeof-policy: {{ .Values.node.nvmeofPolicy | toJson | sha256sum }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "tns-csi-driver.node.serviceAccountName" . }}
@@ -62,6 +67,9 @@ spec:
             - "--enable-nvme-discovery"
             {{- end }}
             - "--max-concurrent-nvme-connects={{ .Values.node.maxConcurrentNVMeConnects | default 5 }}"
+            {{- if .Values.node.nvmeofPolicy }}
+            - "--nvmeof-node-profile=/etc/tns-csi/nvmeof-policy.json"
+            {{- end }}
           env:
             - name: NODE_ID
               valueFrom:
@@ -110,6 +118,12 @@ spec:
               mountPath: /sys
             - name: registry-dir
               mountPath: /var/lib/tns-csi
+            {{- if .Values.node.nvmeofPolicy }}
+            - name: nvmeof-policy
+              mountPath: /etc/tns-csi/nvmeof-policy.json
+              subPath: nvmeof-policy.json
+              readOnly: true
+            {{- end }}
             - name: run-dir
               mountPath: /run
             {{- if .Values.node.iscsi.enabled }}
@@ -163,6 +177,11 @@ spec:
             {{- toYaml .Values.sidecars.livenessprobe.resources | nindent 12 }}
 
       volumes:
+        {{- if .Values.node.nvmeofPolicy }}
+        - name: nvmeof-policy
+          configMap:
+            name: {{ include "tns-csi-driver.fullname" . }}-nvmeof-policy
+        {{- end }}
         - name: plugin-dir
           hostPath:
             path: {{ .Values.node.kubeletPath }}/plugins/{{ .Values.csiDriverName }}

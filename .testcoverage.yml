@@ -26,7 +26,7 @@ threshold:
 override:
   # First match wins, so keep specific paths before general ones.
   - path: ^pkg/driver$
-    threshold: 43
+    threshold: 54
   - path: ^pkg/tnsapi$
     threshold: 38
   - path: ^pkg/retry$

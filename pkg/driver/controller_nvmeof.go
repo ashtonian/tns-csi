@@ -39,8 +39,7 @@ type nvmeofVolumeParams struct {
 	volumeName        string
 	zvolName          string
 	subsystemNQN      string
-	queueSize         string
-	nrIOQueues        string
+	policyParameters  map[string]string
 	storageClass      string
 	server            string
 	pool              string
@@ -127,6 +126,9 @@ func parseZFSZvolProperties(params map[string]string) *zfsZvolProperties {
 // validateNVMeOFParams validates and extracts NVMe-oF volume parameters from the request.
 func validateNVMeOFParams(req *csi.CreateVolumeRequest) (*nvmeofVolumeParams, error) {
 	params := req.GetParameters()
+	if _, policyErr := validateNVMePolicyParameters(params); policyErr != nil {
+		return nil, status.Error(codes.InvalidArgument, policyErr.Error())
+	}
 
 	pool := params["pool"]
 	if pool == "" {
@@ -212,8 +214,7 @@ func validateNVMeOFParams(req *csi.CreateVolumeRequest) (*nvmeofVolumeParams, er
 		pvcName:           pvcName,
 		pvcNamespace:      pvcNamespace,
 		storageClass:      storageClass,
-		nrIOQueues:        params["nvmeof.nr-io-queues"],
-		queueSize:         params["nvmeof.queue-size"],
+		policyParameters:  params,
 	}, nil
 }
 
@@ -364,7 +365,7 @@ func (s *ControllerService) handleExistingNVMeOFVolume(ctx context.Context, para
 
 		// Use subsystem.NQN (what TrueNAS actually has) not params.subsystemNQN (what we would request)
 		resp := buildNVMeOFVolumeResponse(params.volumeName, params.server, subsystem.NQN, existingZvol, subsystem, namespace, existingCapacity)
-		injectQueueParams(resp.Volume.VolumeContext, params.nrIOQueues, params.queueSize)
+		injectNVMePolicyParams(resp.Volume.VolumeContext, params.policyParameters)
 		timer.ObserveSuccess()
 		return resp, true, nil
 	}
@@ -558,7 +559,7 @@ func (s *ControllerService) createNVMeOFVolume(ctx context.Context, req *csi.Cre
 	// Use subsystem.NQN (what TrueNAS actually created) not params.subsystemNQN (what we requested)
 	// TrueNAS may assign a different NQN prefix than what we requested
 	resp := buildNVMeOFVolumeResponse(params.volumeName, params.server, subsystem.NQN, zvol, subsystem, namespace, params.requestedCapacity)
-	injectQueueParams(resp.Volume.VolumeContext, params.nrIOQueues, params.queueSize)
+	injectNVMePolicyParams(resp.Volume.VolumeContext, params.policyParameters)
 
 	klog.Infof("Created NVMe-oF volume: %s (subsystem: %s, NSID: 1)", params.volumeName, subsystem.NQN)
 	timer.ObserveSuccess()
@@ -1068,6 +1069,9 @@ func (s *ControllerService) deleteZVOL(ctx context.Context, meta *VolumeMetadata
 // setupNVMeOFVolumeFromClone sets up NVMe-oF infrastructure for a cloned ZVOL.
 // With independent subsystem architecture, creates a new subsystem for the clone.
 func (s *ControllerService) setupNVMeOFVolumeFromClone(ctx context.Context, req *csi.CreateVolumeRequest, zvol *tnsapi.Dataset, server, _ string, info *cloneInfo) (*csi.CreateVolumeResponse, error) {
+	if _, policyErr := validateNVMePolicyParameters(req.GetParameters()); policyErr != nil {
+		return nil, status.Error(codes.InvalidArgument, policyErr.Error())
+	}
 	klog.Infof("Setting up NVMe-oF namespace for cloned ZVOL: %s (from snapshot, type: %s, cloneMode: %s)", zvol.Name, zvol.Type, info.Mode)
 
 	volumeName := req.GetName()
@@ -1242,7 +1246,7 @@ func (s *ControllerService) setupNVMeOFVolumeFromClone(ctx context.Context, req 
 	// CRITICAL: Mark this volume as cloned from snapshot in VolumeContext
 	// This signals to the node that the volume has existing data and should NEVER be formatted
 	volumeContext[VolumeContextKeyClonedFromSnap] = VolumeContextValueTrue
-	injectQueueParams(volumeContext, params["nvmeof.nr-io-queues"], params["nvmeof.queue-size"])
+	injectNVMePolicyParams(volumeContext, params)
 
 	klog.Infof("Created NVMe-oF volume from snapshot: %s (subsystem: %s, NSID: 1)", volumeName, subsystem.NQN)
 
@@ -1269,6 +1273,9 @@ func (s *ControllerService) setupNVMeOFVolumeFromClone(ctx context.Context, req 
 // adoptNVMeOFVolume adopts an orphaned NVMe-oF volume by re-creating its subsystem and namespace.
 // This is called when a volume is found by CSI name but needs to be adopted into a new cluster.
 func (s *ControllerService) adoptNVMeOFVolume(ctx context.Context, req *csi.CreateVolumeRequest, dataset *tnsapi.DatasetWithProperties, params map[string]string) (*csi.CreateVolumeResponse, error) {
+	if _, policyErr := validateNVMePolicyParameters(req.GetParameters()); policyErr != nil {
+		return nil, status.Error(codes.InvalidArgument, policyErr.Error())
+	}
 	timer := metrics.NewVolumeOperationTimer(metrics.ProtocolNVMeOF, "adopt")
 	volumeName := req.GetName()
 	klog.Infof("Adopting NVMe-oF volume: %s (dataset=%s)", volumeName, dataset.ID)
@@ -1407,7 +1414,7 @@ func (s *ControllerService) adoptNVMeOFVolume(ctx context.Context, req *csi.Crea
 	volumeContext := buildVolumeContext(meta)
 	volumeContext[VolumeContextKeyNSID] = "1"
 	volumeContext[VolumeContextKeyExpectedCapacity] = strconv.FormatInt(requestedCapacity, 10)
-	injectQueueParams(volumeContext, params["nvmeof.nr-io-queues"], params["nvmeof.queue-size"])
+	injectNVMePolicyParams(volumeContext, params)
 
 	// Record volume capacity metric
 	metrics.SetVolumeCapacity(volumeName, metrics.ProtocolNVMeOF, requestedCapacity)

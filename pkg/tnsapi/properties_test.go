@@ -29,6 +29,7 @@ func TestPropertyNames(t *testing.T) {
 		PropertyNVMeSubsystemID,
 		PropertyNVMeNamespaceID,
 		PropertyNVMeSubsystemNQN,
+		PropertyNVMePolicy,
 		// iSCSI properties
 		PropertyISCSIIQN,
 		PropertyISCSITargetID,
