@@ -5,6 +5,7 @@ preserves supplied captures and verifies their read-back against a trusted recei
 It also checks finite extents against independently supplied SHA-256 digests.
 Checksum plans can be retained before writing data and checked before reuse.
 Finalized witness records can be compared with recovery and delivered replies.
+The witness store records commits and seals a generation for finalization.
 It does not connect to Kubernetes/TrueNAS, run fio, inspect a mount, change
 settings or delete data. Tests use synthetic fixtures, fake process receipts and
 temporary local directories. No production driver behavior changes are included.
@@ -141,7 +142,8 @@ supplies the expected run/stream/generation and a separately trusted receipt for
 `<run_id>.witness.json`. The witness finalizer must issue that receipt only after
 reconciling accepted commits, closing the generation to further appends and
 durably retaining the ledger. Computing a receipt from the current ledger cannot
-establish that trust. No witness writer, finalizer or fault controller is included.
+establish that trust. The local store below handles witness commit/finalization;
+network transport, target collection and fault control remain unimplemented.
 
 Ledger format version 1 requires every `WitnessLedger` field, with a nonempty
 sequence prefix starting at 1 and ending at `final_sequence`. Records bind the
@@ -174,7 +176,61 @@ The byte total counts witnessed payload bytes only.
 Invalid ledgers or malformed record sets expose no trusted coverage. Findings
 use stable codes and sequence numbers without echoing hashes or free-form input.
 PASS covers this comparison only; process drain, writer exclusion, actual fsync
-durability, witness storage and live fault qualification remain separate gates.
+durability, independent witness storage qualification and live faults remain
+separate gates.
+
+## Witness commit and finalization
+
+`NewWitnessStore(root, stream)` reserves one fresh run in a caller-selected
+private directory outside the target and fault domains. Use a directory for one
+run, with no other writer modifying its witness files. The store duplicates and
+pins the supplied root. Linux and Darwin support the required no-follow reads;
+other platforms reject construction. Existing run artifacts, including orphan
+entries or a final ledger, refuse reuse. There is no restart/resume API.
+
+The reservation is `<run_id>.witness.start.json`. `Append(record)` requires the
+exact stream/generation, next contiguous sequence, a valid nonoverlapping payload
+extent and canonical SHA-256. The caller must complete target writes and required
+target file/directory syncs **before** submitting a record; the witness store
+cannot observe them. Each accepted record is exclusively written to
+`<run_id>.witness.<20-digit-sequence>.json`, with schema version and record fields.
+The returned receipt follows checked full-write, file-sync, close and directory-
+sync completion. It proves witness artifact persistence through those calls,
+not target durability or fault admission.
+
+An identical retry checks the private regular artifact against its original
+receipt and returns that receipt without another write. Conflicting duplicates,
+invalid records, sequence gaps, overlaps and persistence errors make the instance
+refuse all further appends and finalization. A changed/missing reservation also
+prevents new commits. Partial files remain preserved. Restoring a file or clearing
+a collision cannot reopen the instance. Failed writes/validation never trigger
+retry, overwrite or cleanup. Identical successful requests remain idempotent.
+
+`Finalize()` seals the generation under the same mutex as appends, verifies the
+reservation and every accepted entry against retained receipts, rejects extra
+run artifacts, then exclusively writes the nonempty `<run_id>.witness.json`
+ledger. Every accepted commit is included, even if its reply was lost. A racing
+append either commits before the seal and is included, or returns
+`ErrWitnessSealed`. The caller must drain the target writer and account for
+requests not yet submitted. No later append is admitted, including a retry.
+Successful repeated finalization verifies and returns the original ledger
+receipt without writing. Failed or empty finalization cannot be retried.
+
+`LoadWitnessLedger(root, stream, receipt)` reads the final ledger through the
+private descriptor-relative no-follow path and authenticates its full format,
+prefix and identity. It returns no bytes on error. Retain the final receipt
+independently and supply the loaded bytes to `ReconcileWitness`. An entry receipt
+cannot substitute for this finalization receipt. `Close` releases only the owned
+descriptor; it does not finalize or remove evidence. Abandoned runs stay
+unfinalized, and new store construction refuses to resume them.
+
+Entries are capped at 2 KiB and the finalized ledger at 2 MiB/4096 records.
+Append reserves a conservative serialized ledger budget before accepting each
+entry. Directory scans use bounded batches and reject more than 16,384 entries,
+including unrelated files. Tests cover lost replies, concurrent ownership and
+finalization, file alterations/symlinks, closed/renamed roots and failures that
+prevent continuation. Temporary-file sync checks are not power-loss tests or
+qualification of a live witness service.
 
 ## Capture retention
 
@@ -293,10 +349,10 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Part of Q12/Q13/Q14 | Per-job counts, distinct plans/options, finite SHA-256 extent checks and independently receipted checksum plans; scratch corruption/short-read controls | Independent reader/source identity, trusted receipt custody, write/read process ordering and lab integration |
 | Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
 | Part of Q17 | Exclusive run reservation/capture writes and independent receipt-based read-back; no overwrite or automatic retry/cleanup | Trusted receipt retention, audited exact-resource cleanup and crash reconciliation |
-| Part of fault-durability evidence | Receipt-authenticated finalized witness comparison, lost-reply recovery and separate unwitnessed-tail accounting | Durable witness writer/finalizer, complete target collection, ownership/fault admission and live durability qualification |
+| Part of fault-durability evidence | Checked witness commit/finalization, receipt-authenticated comparison, lost-reply recovery and separate unwitnessed-tail accounting | Witness transport, complete target collection, target fsync ordering, ownership/fault admission and live durability qualification |
 | Q04/Q05/Q07/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, XFS tools and raw-block regression |
 
-All B/I/L/F/H/A/U/C target scenarios, runtime images, durability witness,
+All B/I/L/F/H/A/U/C target scenarios, runtime images, live durability witness,
 target fault injection and benchmarks are **NOT RUN**. Scratch checksum tests
 exercise regular temporary files only.
 The baseline contains no performance package, so there is no baseline parser
@@ -391,3 +447,12 @@ coverage and invalid finalized evidence. No dedicated fuzz test/session was
 added/run. Production code, dependencies and coverage policy are unchanged;
 production coverage was not repeated locally. These are offline comparison
 checks; no witness service, target collector or fault was run.
+
+The witness-store slice passed Go 1.26.2 focused Darwin/Linux shuffled race
+tests, complete `make check` (80/80 CSI sanity cases), the unchanged nolint
+budget (283 pairs) and diff checks. Controls cover persistent commit/finalize/
+reopen, lost replies, concurrent owners and sealing, altered artifacts, sticky
+failures and private descriptor lifetime. No dedicated fuzz test/session was
+added/run. Production code, dependencies and coverage policy are unchanged;
+production coverage was not repeated locally. No network witness service,
+target writer/collector, live workload or fault was run.
