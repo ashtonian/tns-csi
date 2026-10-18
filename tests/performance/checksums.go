@@ -158,7 +158,7 @@ func verifyExtent(ctx context.Context, plan JobPlan, expected []byte, source io.
 		return job, reasonProcessError
 	}
 	if !bytes.Equal(digest.Sum(nil), expected) {
-		return job, "CHECKSUM_MISMATCH"
+		return job, reasonChecksumMismatch
 	}
 	verified := plan.SizeBytes
 	job.VerifiedBytes = &verified

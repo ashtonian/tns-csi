@@ -6,6 +6,8 @@ It also checks finite extents against independently supplied SHA-256 digests.
 Checksum plans can be retained before writing data and checked before reuse.
 Finalized witness records can be compared with recovery and delivered replies.
 The witness store records commits and seals a generation for finalization.
+The append-file writer orders target syncs before witness submission, and the
+recovery reader verifies actual headers and payloads against that final ledger.
 It does not connect to Kubernetes/TrueNAS, run fio, inspect a mount, change
 settings or delete data. Tests use synthetic fixtures, fake process receipts and
 temporary local directories. No production driver behavior changes are included.
@@ -232,6 +234,63 @@ finalization, file alterations/symlinks, closed/renamed roots and failures that
 prevent continuation. Temporary-file sync checks are not power-loss tests or
 qualification of a live witness service.
 
+## Witness target writes and recovery
+
+`NewWitnessFileWriter(plan, target, parent, witness)` borrows an empty regular
+target file, its caller-identified parent directory and a `WitnessCommitter`.
+The caller creates and opens those handles safely, establishes target identity,
+exclusive ownership and fault-domain separation, and keeps them open. Constructor
+checks cannot establish the parent relationship or ownership. `WitnessStore`
+implements the committer interface; no network transport is included.
+
+`WitnessFilePlan` binds the stream and limits total file capacity, payload size
+and record count. Capacity includes headers and must fit signed file offsets.
+Payloads are limited to 32 MiB and records to 4096. The writer keeps a private
+payload copy bounded by the planned maximum; the caller's original allocation
+and operating-system overhead are additional. A plan does not admit live I/O.
+
+`Append(ctx, payload)` pins the payload and computes SHA-256 before writing its
+header and complete payload. Full writes, exact file size, target sync and the
+first record's parent-directory sync must succeed before witness submission.
+The returned receipt must match the canonical version-1 witness entry exactly.
+Target errors permanently stop the writer, retaining partial bytes without
+rewrite or cleanup. An absent, invalid or canceled witness reply returns
+`ErrWitnessPending` with submitted metadata and no receipt. New target writes
+are blocked until explicit `RetryWitness` resolves that same request; retry
+never reads, writes or syncs the target or parent. `Close` stops calls without
+flushing, closing borrowed handles or finalizing the witness; `Pending` retains
+unresolved metadata for reconciliation. There is no restart/resume API.
+
+Target header format version 1 is independent of ledger version 1 and capture
+version 2. Each record starts with a 1024-byte header: `TNSWIT01`, big-endian
+64-bit version and JSON-body length, a 32-byte body SHA-256, eight reserved zero
+bytes, then a strict `WitnessRecord` JSON body and zero padding. The body is at
+most 960 bytes. Payload offsets include preceding headers; records are contiguous
+from file offset zero. Headers never contribute verified payload bytes.
+
+`VerifyWitnessFile(ctx, plan, source, receipt, rawLedger, replies)` borrows an
+independently identified read-only regular file. It authenticates the finalized
+ledger, reply membership and finite layout before any source call, then reads
+each required header and hashes every complete payload. Header identity,
+checksum, strict fields, padding and payload digest must match. Healthy record
+coverage remains visible when another required record fails; aggregate
+`VerifiedBytes` is unknown on any failure. Cancellation and observed file size
+or modification-time changes fail verification. Those checks do not establish
+exclusion or detect every concurrent change; the caller must ensure exclusion.
+
+`ReadBytes` includes actual header and payload reads. `UnwitnessedTailBytes`
+reports stable file bytes after the authenticated prefix, including incomplete
+headers/payloads; the reader does not inspect or verify that suffix. A prefix
+PASS cannot erase producer errors, failed syncs or uncertain process results;
+the supervising workload must retain those as failures. Context checks occur
+between calls and cannot interrupt blocked I/O or witness submission.
+
+Scratch controls exercise this sequence with real temporary files and the local
+witness store. Safe handle opening, immutable source identity, exclusion,
+independent witness transport/storage, process supervision and crash/fault
+qualification remain integration obligations. No runtime admission or fault
+controller is included.
+
 ## Capture retention
 
 `NewEvidenceStore` takes a validated manifest and a caller-selected `*os.Root`
@@ -349,7 +408,7 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Part of Q12/Q13/Q14 | Per-job counts, distinct plans/options, finite SHA-256 extent checks and independently receipted checksum plans; scratch corruption/short-read controls | Independent reader/source identity, trusted receipt custody, write/read process ordering and lab integration |
 | Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
 | Part of Q17 | Exclusive run reservation/capture writes and independent receipt-based read-back; no overwrite or automatic retry/cleanup | Trusted receipt retention, audited exact-resource cleanup and crash reconciliation |
-| Part of fault-durability evidence | Checked witness commit/finalization, receipt-authenticated comparison, lost-reply recovery and separate unwitnessed-tail accounting | Witness transport, complete target collection, target fsync ordering, ownership/fault admission and live durability qualification |
+| Part of fault-durability evidence | Target write/sync ordering, checked witness commit/finalization, actual header/payload recovery, lost-reply reconciliation and separate unwitnessed-tail accounting | Safe handle opening, independent source/storage identity, witness transport, process supervision, ownership/fault admission and live durability qualification |
 | Q04/Q05/Q07/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, XFS tools and raw-block regression |
 
 All B/I/L/F/H/A/U/C target scenarios, runtime images, live durability witness,
@@ -456,3 +515,13 @@ failures and private descriptor lifetime. No dedicated fuzz test/session was
 added/run. Production code, dependencies and coverage policy are unchanged;
 production coverage was not repeated locally. No network witness service,
 target writer/collector, live workload or fault was run.
+
+The target-file slice passed Go 1.26.2 focused Darwin/Linux shuffled race tests,
+complete `make check` (80/80 required CSI sanity cases), repository lint, the
+unchanged nolint budget (283 pairs) and diff checks. Real temporary-file controls
+cover append/sync/commit/finalize/read-only recovery, lost replies, witness-only
+resolution, partial writes, corrupted headers/payloads, cancellation and retained
+unwitnessed suffixes. No dedicated fuzz test/session was added/run. Production
+code, dependencies and coverage policy are unchanged; production coverage was
+not repeated locally. No network witness service, live workload or storage fault
+was run; scratch syscall ordering does not establish crash durability.

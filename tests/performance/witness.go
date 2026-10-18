@@ -97,7 +97,7 @@ func ReconcileWitness(stream WitnessStream, receipt ArtifactReceipt, raw []byte,
 			actual.SHA256 = record.SHA256
 			findingCode := reasonWitnessConflict
 			if actual == record {
-				findingCode = "CHECKSUM_MISMATCH"
+				findingCode = reasonChecksumMismatch
 			}
 			result.reject(findingCode, &record.Sequence)
 		default:

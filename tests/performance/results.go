@@ -11,6 +11,7 @@ type Status string
 const (
 	reasonEvidenceIncomplete = "EVIDENCE_INCOMPLETE"
 	reasonProcessError       = "PROCESS_ERROR"
+	reasonChecksumMismatch   = "CHECKSUM_MISMATCH"
 
 	// Pass means the containing result's required assertions succeeded.
 	Pass Status = "PASS"
