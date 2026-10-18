@@ -183,6 +183,31 @@ func TestEvaluateFioProcessFailures(t *testing.T) {
 	}
 }
 
+func TestEvaluateFioRejectsUnicodeCounterCollisions(t *testing.T) {
+	valid := fixture(t, "fio-success.json")
+	for _, test := range []struct {
+		name        string
+		original    string
+		replacement string
+	}{
+		{name: "literal long s", original: `"short_ios": 0`, replacement: `"short_ios": 1, "` + "\u017f" + `hort_ios": 0`},
+		{name: "escaped long s", original: `"short_ios": 0`, replacement: `"short_ios": 1, "\u017fhort_ios": 0`},
+		{name: "reversed aliases", original: `"short_ios": 0`, replacement: `"\u017fhort_ios": 1, "short_ios": 0`},
+		{name: "dropped I/O", original: `"drop_ios": 0`, replacement: `"drop_ios": 1, "drop_io\u017f": 0`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := bytes.Replace(valid, []byte(test.original), []byte(test.replacement), 1)
+			if bytes.Equal(raw, valid) {
+				t.Fatal("counter fixture did not change")
+			}
+			result := EvaluateFio(testManifest(t), successfulProcess(), raw)
+			if result.Status != Fail || !hasCode(result, "OUTPUT_INVALID") {
+				t.Fatal("Unicode field alias hid a nonzero error counter")
+			}
+		})
+	}
+}
+
 func TestEvaluateFioReadPhaseAndJobOrder(t *testing.T) {
 	manifest := testManifest(t)
 	manifest.Phase = "read"

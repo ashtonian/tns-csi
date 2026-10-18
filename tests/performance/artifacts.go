@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	// EvidenceVersion identifies the capture index format, independently of the manifest.
-	EvidenceVersion = 1
+	// EvidenceVersion identifies the capture format and evaluation rules.
+	EvidenceVersion = 2
 
 	artifactManifest = "manifest"
 	artifactStdout   = "stdout"

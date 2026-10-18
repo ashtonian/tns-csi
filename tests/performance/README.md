@@ -42,7 +42,9 @@ process receipt even when evaluation fails. The evaluator:
 - Requires a known exit, complete streams and confirmed child exits; timeout,
   cancellation, signal or process error fails even when stdout looks healthy.
 - Parses exactly one JSON/JSON+ document up to 32 MiB, without stripping a
-  diagnostic prefix or accepting successive status documents.
+  diagnostic prefix or accepting successive status documents. Duplicate keys
+  include Unicode case aliases recognized by Go's JSON decoder, such as long s
+  in `short_ios`; literal and escaped spellings receive the same check.
 - Matches every unique expected job by name, checks all job errors and optional
   continued-error fields, and retains observations from other valid jobs.
 - Requires explicit canonical per-job options for filename, offset, size,
@@ -112,11 +114,13 @@ detect replacement of that index and its inputs. These hashes establish
 consistency with the supplied receipt; they do not authenticate the collector
 or prove its process observations, filesystem crash durability or storage results.
 
-Capture-index version 1 identifies both its JSON format and evaluation rules,
+Capture-index version 2 identifies both its JSON format and evaluation rules,
 independently of manifest schema 1. The saved index requires `index: null`; its
-own receipt remains separate. Unversioned indexes and unsupported versions fail
-explicitly. Future changes to evaluation semantics need a new version or an
-explicit version-specific evaluator. There is no automatic migration.
+own receipt remains separate. Version 1 used weaker Unicode duplicate-key rules
+and is no longer supported: it returns `ErrEvidenceVersion` without changing
+saved files. Unversioned indexes also fail. Future changes to evaluation
+semantics need a new version or an explicit version-specific evaluator. There
+is no automatic migration.
 
 The verifier requires exactly four uniquely named receipts for the same run's
 manifest, stdout, stderr and process record. It checks private regular files,
@@ -162,8 +166,9 @@ not summarize or claim to validate their distributions.
 Both fixture files are hand-authored synthetic controls, not captures from a
 successful fio/storage run. They contain no private target identities or keys.
 The tests inject malformed output, last-job errors, short coverage, reordered
-jobs, missing metrics, bad process receipts and credential sentinels. Integer
-tests include counts above the exact floating-point integer range. Fuzz targets
+jobs, missing metrics, Unicode counter aliases, bad process receipts and
+credential sentinels. Integer tests include counts above the exact floating-point
+integer range. Fuzz targets
 exercise untrusted JSON without opening devices or spawning processes.
 
 ## Scenario coverage and remaining work
@@ -241,3 +246,10 @@ The explicit-null percentile regression fails against published commit
 Linux used the same pinned disposable container/source-stream setup above.
 Production code, module versions and coverage policy are unchanged; the
 production coverage gate was not repeated for this offline slice.
+
+The Unicode-key correction passed focused shuffled race tests on darwin/arm64
+and linux/arm64 (92.7% helper coverage), focused/repository lint, `make check`
+(80 sanity cases), the unchanged nolint budget and diff checks. All four fuzz
+targets passed separate five-second/two-worker runs. The four counter-alias
+regressions failed against `bb96f08` before the correction. No production code,
+dependency version or coverage policy changed.

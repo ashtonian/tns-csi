@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"unicode"
 )
 
 var errJSON = errors.New("invalid JSON document")
@@ -139,10 +140,14 @@ func checkObject(decoder *json.Decoder, depth int) error {
 			return errJSON
 		}
 		name, ok := key.(string)
-		if !ok || keys[strings.ToLower(name)] {
+		if !ok {
 			return errJSON
 		}
-		keys[strings.ToLower(name)] = true
+		folded := foldJSONKey(name)
+		if keys[folded] {
+			return errJSON
+		}
+		keys[folded] = true
 		if err := checkValue(decoder, depth); err != nil {
 			return err
 		}
@@ -151,4 +156,17 @@ func checkObject(decoder *json.Decoder, depth int) error {
 		return errJSON
 	}
 	return nil
+}
+
+func foldJSONKey(name string) string {
+	// Match encoding/json's Unicode field lookup, including long s and Kelvin K.
+	return strings.Map(func(character rune) rune {
+		minimum := character
+		for next := unicode.SimpleFold(character); next != character; next = unicode.SimpleFold(next) {
+			if next < minimum {
+				minimum = next
+			}
+		}
+		return minimum
+	}, name)
 }

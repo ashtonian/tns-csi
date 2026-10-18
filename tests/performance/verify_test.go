@@ -260,6 +260,12 @@ func TestVerifyEvidenceRejectsForgedPassAndUnsupportedVersion(t *testing.T) {
 	requireRejectedEvidence(t, root, index, ErrEvidenceVersion)
 }
 
+func TestVerifyEvidenceRejectsPriorEvaluationRules(t *testing.T) {
+	root, saved := retainedEvidence(t, healthyCapture(t))
+	index := editIndex(t, root, *saved.Index, func(document map[string]any) { document["schema_version"] = 1 })
+	requireRejectedEvidence(t, root, index, ErrEvidenceVersion)
+}
+
 func TestVerifyEvidenceStrictProcessAndManifest(t *testing.T) {
 	for name, change := range map[string]func(map[string]any){
 		"missing cancel":  func(document map[string]any) { delete(document, "canceled") },
