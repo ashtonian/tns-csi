@@ -1,0 +1,33 @@
+{
+  "fio version": "fio-3.39",
+  "timestamp": 1802822400,
+  "jobs": [
+    {
+      "jobname": "job-a",
+      "error": 0,
+      "job options": {
+        "filename": "job-a.bin", "rw": "write", "offset": "0", "size": "8192", "io_size": "8192",
+        "bs": "4096", "iodepth": "2", "numjobs": "1", "group_reporting": "0", "time_based": "0", "loops": "1", "verify": "0"
+      },
+      "read": {"io_bytes": 0, "total_ios": 0, "short_ios": 0, "drop_ios": 0},
+      "write": {
+        "io_bytes": 8192, "total_ios": 2, "short_ios": 0, "drop_ios": 0,
+        "bw_bytes": 819200, "iops": 200.0, "runtime": 10,
+        "clat_ns": {"N": 2, "mean": 1000.5, "percentile": {"50.000000": 1000, "99.000000": 1100}},
+        "lat_ns": {"N": 2, "mean": 1200.5}
+      },
+      "trim": {"io_bytes": 0, "total_ios": 0, "short_ios": 0, "drop_ios": 0}
+    },
+    {
+      "jobname": "job-b",
+      "error": 0,
+      "job options": {
+        "filename": "job-b.bin", "rw": "write", "offset": "4096", "size": "4096", "io_size": "4096",
+        "bs": "4096", "iodepth": "1", "numjobs": "1", "group_reporting": "0", "time_based": "0", "loops": "1", "verify": "0"
+      },
+      "read": {"io_bytes": 0, "total_ios": 0, "short_ios": 0, "drop_ios": 0},
+      "write": {"io_bytes": 4096, "total_ios": 1, "short_ios": 0, "drop_ios": 0},
+      "trim": {"io_bytes": 0, "total_ios": 0, "short_ios": 0, "drop_ios": 0}
+    }
+  ]
+}

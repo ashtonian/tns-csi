@@ -111,10 +111,10 @@ test-sanity:
 	@echo "Running CSI sanity tests..."
 	./tests/sanity/test-sanity.sh
 
-# Unit tests: race detector on, randomized order, driver + CLI packages (what CI runs).
+# Unit tests: driver, CLI and offline performance evidence; no live E2E setup.
 test-unit:
 	@echo "Running unit tests..."
-	$(GOTEST) -v -short -race -shuffle=on ./pkg/... ./cmd/...
+	$(GOTEST) -v -short -race -shuffle=on ./pkg/... ./cmd/... ./tests/performance/...
 
 # Shell-script unit tests (test runners live in tests/sanity).
 test-scripts:
