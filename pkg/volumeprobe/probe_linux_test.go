@@ -117,6 +117,56 @@ func TestLinuxHelperObservesReadOnlyAndChecksMountIdentity(t *testing.T) {
 	}
 }
 
+func TestLinuxHelperObservesSymlinkTargetsAndRechecksMountIdentity(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target")
+	child := filepath.Join(target, "child")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, destination, suffix string
+	}{
+		{"absolute-final", target, ""},
+		{"absolute-parent", target, "child"},
+		{"relative-final", "target", ""},
+		{"relative-parent", "target", "child"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			link := filepath.Join(directory, test.name)
+			if err := os.Symlink(test.destination, link); err != nil {
+				t.Fatal(err)
+			}
+			request := requestForDirectory(t, filepath.Join(target, test.suffix))
+			request.Path = filepath.Join(link, test.suffix)
+			runner := newTestRunner(t, t.TempDir())
+			result, err := runner.Probe(context.Background(), "v", request)
+			if err != nil || result.Code != OK || result.TotalBytes == 0 {
+				t.Fatalf("symlink observation: %+v %v", result, err)
+			}
+		})
+	}
+	request := requestForDirectory(t, target)
+	link := filepath.Join(directory, "retargeted")
+	if err := os.Symlink("/proc", link); err != nil {
+		t.Fatal(err)
+	}
+	request.Path = link
+	runner := newTestRunner(t, t.TempDir())
+	if result, err := runner.Probe(context.Background(), "v", request); err != nil || result.Code != IdentityChanged || result.TotalBytes != 0 {
+		t.Fatalf("changed symlink target: %+v %v", result, err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(directory, "missing"), link); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runner.Probe(context.Background(), "v", request); err != nil || result.Code != Missing || result.TotalBytes != 0 {
+		t.Fatalf("missing symlink target: %+v %v", result, err)
+	}
+}
+
 func TestMetadataReadIsBoundedAndStrict(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metadata")
 	if value, err := readMetadata(path); err != nil || value != "" {

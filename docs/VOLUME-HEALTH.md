@@ -59,8 +59,10 @@ controller through sysfs ownership, including native multipath. A retained node
 record or staging metadata binds that observation to the volume. Legacy volumes
 without either cannot receive a healthy NVMe result; supply their staging path
 or complete normal staging to establish the binding. Corrupt or conflicting
-metadata refuses the observation. Parent symlinks are resolved inside a bounded
-helper, and the parent checks the resulting mount-table identity again.
+metadata refuses the observation. Absolute and relative symlinks, including
+parent components, are followed inside a bounded helper. The opened descriptor's
+device and mount ID must match the captured identity, and the parent checks the
+resulting mount-table identity again.
 
 Raw block volumes use a bounded metadata-only preflight to identify the device
 before capturing namespace/controller state. The capacity result must refer to

@@ -133,21 +133,10 @@ func readMetadata(path string) (string, error) {
 }
 
 func observeFilesystem(ctx context.Context, request Request, leases []*os.File) Result {
-	root, err := os.OpenRoot("/")
+	// Absolute symlinks are valid volume paths; verify the opened descriptor below.
+	file, err := os.Open(request.Path)
 	if err != nil {
 		return Result{Code: classifyError(err)}
-	}
-	name := strings.TrimPrefix(filepath.Clean(request.Path), "/")
-	if name == "" {
-		name = "."
-	}
-	file, openErr := root.Open(name)
-	closeRootErr := root.Close()
-	if openErr != nil || closeRootErr != nil {
-		if file != nil {
-			closeLease(file)
-		}
-		return Result{Code: classifyError(errors.Join(openErr, closeRootErr))}
 	}
 	defer closeLease(file)
 	var stat unix.Stat_t
