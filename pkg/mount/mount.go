@@ -5,8 +5,10 @@ import "strings"
 
 // Entry describes the filesystem mounted at a mount point.
 type Entry struct {
-	Source string // e.g. "10.0.0.5:/mnt/tank/pvc-1" or "/dev/nvme0n1"
-	FSType string // e.g. "nfs4", "ext4"
+	Source  string // e.g. "10.0.0.5:/mnt/tank/pvc-1" or "/dev/nvme0n1"
+	FSType  string // e.g. "nfs4", "ext4"
+	Device  string // kernel filesystem major:minor from mountinfo
+	MountID int    // mount-namespace identity; zero when unavailable
 }
 
 // JoinMountOptions joins mount options with commas.

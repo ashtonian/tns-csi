@@ -178,3 +178,26 @@ func FuzzLookupMount(f *testing.F) {
 		_, _, _ = lookupMount(p, target) // must not panic
 	})
 }
+
+func TestLexicalMountIdentityDoesNotResolveParentPaths(t *testing.T) {
+	ctx := context.Background()
+	entry, mounted, err := MountedEntryLexical(ctx, "/")
+	if err != nil || !mounted || entry.MountID <= 0 || entry.Device == "" {
+		t.Fatalf("kernel identity: %+v %v %v", entry, mounted, err)
+	}
+	path := filepath.Join(t.TempDir(), "dangling")
+	if err := os.Symlink("/missing-parent", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, mounted, err := MountedEntryLexical(ctx, filepath.Join(path, "child")); err != nil || mounted {
+		t.Fatalf("lexical lookup resolved application path: %v %v", mounted, err)
+	}
+	if _, _, err := MountedEntryLexical(ctx, "relative"); err == nil {
+		t.Fatal("accepted relative path")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := MountedEntryLexical(canceled, "/"); err == nil {
+		t.Fatal("ignored cancellation")
+	}
+}

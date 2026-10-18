@@ -64,6 +64,11 @@ func MountedEntry(ctx context.Context, path string) (Entry, bool, error) {
 	return Entry{}, mounted, err
 }
 
+// MountedEntryLexical is unsupported on the development-only macOS platform.
+func MountedEntryLexical(context.Context, string) (Entry, bool, error) {
+	return Entry{}, false, errSourceMountUnsupported
+}
+
 // IsSourceMounted checks whether a source device is mounted anywhere on macOS.
 func IsSourceMounted(context.Context, string) (bool, error) {
 	return false, errSourceMountUnsupported

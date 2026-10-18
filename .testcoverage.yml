@@ -26,7 +26,9 @@ threshold:
 override:
   # First match wins, so keep specific paths before general ones.
   - path: ^pkg/driver$
-    threshold: 54
+    threshold: 56
+  - path: ^pkg/volumeprobe$
+    threshold: 80
   - path: ^pkg/tnsapi$
     threshold: 38
   - path: ^pkg/retry$
@@ -34,7 +36,7 @@ override:
   - path: ^pkg/metrics$
     threshold: 70
   - path: ^pkg/mount$
-    threshold: 57
+    threshold: 82
   - path: ^cmd/kubectl-tns-csi$
     threshold: 2
   # 10.0% once its query tests landed.

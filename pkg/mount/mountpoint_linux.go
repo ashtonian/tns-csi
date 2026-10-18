@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -35,6 +36,18 @@ func MountedEntry(ctx context.Context, path string) (Entry, bool, error) {
 	return lookupMount(selfMountInfo, target)
 }
 
+// MountedEntryLexical reads an exact absolute mount-table path without resolving
+// parent symlinks, which could themselves reside on an unresponsive filesystem.
+func MountedEntryLexical(ctx context.Context, path string) (Entry, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Entry{}, false, err
+	}
+	if !filepath.IsAbs(path) {
+		return Entry{}, false, syscall.EINVAL
+	}
+	return lookupMount(selfMountInfo, filepath.Clean(path))
+}
+
 // lookupMount finds the topmost mount whose mount point equals target in mountInfoFile.
 func lookupMount(mountInfoFile, target string) (Entry, bool, error) {
 	infos, err := mountutils.ParseMountInfo(mountInfoFile)
@@ -52,7 +65,7 @@ func lookupMount(mountInfoFile, target string) (Entry, bool, error) {
 		return Entry{}, false, nil
 	}
 	top := topmostMount(matches)
-	return Entry{Source: unescapeMountField(top.Source), FSType: top.FsType}, true, nil
+	return Entry{Source: unescapeMountField(top.Source), FSType: top.FsType, Device: strconv.Itoa(top.Major) + ":" + strconv.Itoa(top.Minor), MountID: top.ID}, true, nil
 }
 
 // topmostMount picks the visible mount from mounts stacked on one mount point. A mount

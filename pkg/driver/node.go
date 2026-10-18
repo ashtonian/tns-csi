@@ -5,13 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/fenio/tns-csi/pkg/cmdexec"
 	"github.com/fenio/tns-csi/pkg/metrics"
 	"github.com/fenio/tns-csi/pkg/mount"
 	"github.com/fenio/tns-csi/pkg/tnsapi"
+	"github.com/fenio/tns-csi/pkg/volumeprobe"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
@@ -58,6 +58,9 @@ type NodeService struct {
 	nvmeQueueWriteFn     func(context.Context, string, string, uint64, func() error) error
 	nvmeExpandDeviceFn   func(string) (string, error)
 	nvmeDeviceNumberFn   func(string) (string, error)
+	healthProbeFn        func(context.Context, string, volumeprobe.Request) (volumeprobe.Result, error)
+	healthMountFn        func(context.Context, string) (mount.Entry, bool, error)
+	healthProbeDirectory string
 	nodeID               string
 	testMode             bool
 	enableDiscovery      bool
@@ -69,13 +72,14 @@ func NewNodeService(nodeID string, apiClient tnsapi.ClientInterface, testMode bo
 		maxConcurrentNVMeConnects = 5
 	}
 	service := &NodeService{
-		nvmePolicyDirectory: "/var/lib/tns-csi/nvmeof",
-		nodeID:              nodeID,
-		apiClient:           apiClient,
-		testMode:            testMode,
-		nodeRegistry:        nodeRegistry,
-		enableDiscovery:     enableDiscovery,
-		nvmeConnectSem:      make(chan struct{}, maxConcurrentNVMeConnects),
+		healthProbeDirectory: "/var/lib/tns-csi/health-probes",
+		nvmePolicyDirectory:  "/var/lib/tns-csi/nvmeof",
+		nodeID:               nodeID,
+		apiClient:            apiClient,
+		testMode:             testMode,
+		nodeRegistry:         nodeRegistry,
+		enableDiscovery:      enableDiscovery,
+		nvmeConnectSem:       make(chan struct{}, maxConcurrentNVMeConnects),
 	}
 	for _, option := range options {
 		if option != nil {
@@ -548,9 +552,12 @@ func (s *NodeService) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVo
 	if volumePath == "" {
 		return nil, status.Error(codes.InvalidArgument, "Volume path is required")
 	}
+	if !s.testMode {
+		return s.mountedVolumeStats(ctx, req)
+	}
 
 	// Verify the volume path exists
-	pathInfo, err := os.Stat(volumePath)
+	_, err := os.Stat(volumePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, status.Errorf(codes.NotFound, "Volume path %s does not exist", volumePath)
@@ -559,75 +566,17 @@ func (s *NodeService) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVo
 	}
 
 	// In test mode, skip mount check and return mock stats
-	if s.testMode {
-		klog.V(4).Infof("Test mode: returning mock stats for %s", volumePath)
-		return &csi.NodeGetVolumeStatsResponse{
-			Usage: []*csi.VolumeUsage{
-				{
-					Unit:      csi.VolumeUsage_BYTES,
-					Total:     1073741824, // 1GB
-					Used:      104857600,  // 100MB
-					Available: 968884224,  // ~924MB
-				},
-			},
-		}, nil
-	}
-
-	// Check if the path is mounted
-	mounted, err := mount.IsMounted(ctx, volumePath)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to check if path is mounted: %v", err)
-	}
-	if !mounted {
-		return nil, status.Errorf(codes.InvalidArgument, "Volume is not mounted at path %s", volumePath)
-	}
-
-	// Get filesystem statistics
-	var statfs syscall.Statfs_t
-	if err := syscall.Statfs(volumePath, &statfs); err != nil {
-		return nil, status.Errorf(codes.Internal, "Failed to get volume stats: %v", err)
-	}
-
-	// Calculate capacity, used, and available bytes
-	// Note: statfs returns values in blocks, need to multiply by block size
-	// Use platform-specific helper to safely convert Bsize to uint64
-	blockSize := getBlockSize(&statfs)
-	totalBytes := statfs.Blocks * blockSize
-	availableBytes := statfs.Bavail * blockSize
-	usedBytes := totalBytes - (statfs.Bfree * blockSize)
-
-	klog.V(4).Infof("Volume stats for %s: total=%d, used=%d, available=%d",
-		volumePath, totalBytes, usedBytes, availableBytes)
-
-	resp := &csi.NodeGetVolumeStatsResponse{
+	klog.V(4).Infof("Test mode: returning mock stats for %s", volumePath)
+	return &csi.NodeGetVolumeStatsResponse{
 		Usage: []*csi.VolumeUsage{
 			{
 				Unit:      csi.VolumeUsage_BYTES,
-				Total:     safeUint64ToInt64(totalBytes),
-				Used:      safeUint64ToInt64(usedBytes),
-				Available: safeUint64ToInt64(availableBytes),
+				Total:     1073741824, // 1GB
+				Used:      104857600,  // 100MB
+				Available: 968884224,  // ~924MB
 			},
 		},
-	}
-
-	// For directories (filesystem mounts), also report inode statistics
-	if pathInfo.IsDir() {
-		totalInodes := statfs.Files
-		freeInodes := statfs.Ffree
-		usedInodes := totalInodes - freeInodes
-
-		resp.Usage = append(resp.Usage, &csi.VolumeUsage{
-			Unit:      csi.VolumeUsage_INODES,
-			Total:     safeUint64ToInt64(totalInodes),
-			Used:      safeUint64ToInt64(usedInodes),
-			Available: safeUint64ToInt64(freeInodes),
-		})
-
-		klog.V(4).Infof("Inode stats for %s: total=%d, used=%d, free=%d",
-			volumePath, totalInodes, usedInodes, freeInodes)
-	}
-
-	return resp, nil
+	}, nil
 }
 
 // NodeGetVolumeHealth reports per-volume health through the CSI 1.13 health API.
@@ -646,9 +595,16 @@ func (s *NodeService) NodeGetVolumeHealth(ctx context.Context, req *csi.NodeGetV
 			if err := s.verifyVolumeExists(ctx, req.GetVolumeId()); err != nil {
 				return nil, err
 			}
-		} else {
-			health = s.checkVolumeHealth(ctx, volumePath, req.GetStagingTargetPath())
+			return nil, status.Error(codes.Unavailable, "a publish or staging path is needed to establish filesystem liveness")
 		}
+		var err error
+		health, err = s.checkVolumeHealth(ctx, req.GetVolumeId(), volumePath, req.GetStagingTargetPath())
+		if err != nil {
+			return nil, err
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, status.FromContextError(ctx.Err()).Err()
 	}
 
 	return &csi.NodeGetVolumeHealthResponse{

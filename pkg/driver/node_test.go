@@ -689,7 +689,7 @@ func TestNodeGetVolumeHealthWithoutPath(t *testing.T) {
 			lookup: func(context.Context, string, string) (*tnsapi.DatasetWithProperties, error) {
 				return &tnsapi.DatasetWithProperties{Dataset: tnsapi.Dataset{ID: "tank/test-volume"}}, nil
 			},
-			wantErr: codes.OK,
+			wantErr: codes.Unavailable,
 		},
 		{
 			name: "missing volume",

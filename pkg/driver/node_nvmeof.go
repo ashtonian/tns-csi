@@ -292,6 +292,15 @@ func (s *NodeService) stageNVMeDevice(ctx context.Context, volumeID, devicePath,
 	if err := s.prepareNVMePolicy(ctx, volumeID, devicePath, stagingTargetPath, params); err != nil {
 		return nil, nvmeLifecycleError(ctx, "NVMe policy could not be enforced before staging", err)
 	}
+	if !isBlockVolume {
+		mounted, mountErr := s.checkMountedNVMeStage(ctx, volumeID, stagingTargetPath, params.nqn, volumeCapability)
+		if mountErr != nil {
+			return nil, mountErr
+		}
+		if mounted {
+			return &csi.NodeStageVolumeResponse{}, nil
+		}
+	}
 	// For filesystem volumes, wait for device to be fully initialized.
 	if !isBlockVolume {
 		// First, wait for device to report non-zero size (indicates device is initialized)
@@ -520,18 +529,28 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 	if err := s.prepareNVMePolicy(ctx, volumeID, devicePath, stagingTargetPath, params); err != nil {
 		return nil, nvmeLifecycleError(ctx, "cannot enforce policy before filesystem use", err)
 	}
+	mounted, mountErr := s.checkMountedNVMeStage(ctx, volumeID, stagingTargetPath, params.nqn, volumeCapability)
+	if mountErr != nil {
+		return nil, mountErr
+	}
+	if mounted {
+		return &csi.NodeStageVolumeResponse{}, nil
+	}
 	datasetName := volumeContext["datasetName"]
 	nqn := volumeContext["nqn"]
 	klog.V(4).Infof("Formatting and mounting NVMe device: device=%s, path=%s, volume=%s, dataset=%s, NQN=%s",
 		devicePath, stagingTargetPath, volumeID, datasetName, nqn)
 
-	mounted, mountErr := ensureStagingTarget(ctx, stagingTargetPath)
+	mounted, mountErr = ensureStagingTarget(ctx, stagingTargetPath)
 	if mountErr != nil {
 		return nil, mountErr
 	}
 	if mounted {
 		if err := s.verifyNVMeStagingSource(ctx, stagingTargetPath, params.nqn, false); err != nil {
 			return nil, nvmeLifecycleError(ctx, "mounted staging source cannot be verified", err)
+		}
+		if healthErr := s.verifyMountedNVMeHealth(ctx, volumeID, stagingTargetPath, params.nqn); healthErr != nil {
+			return nil, healthErr
 		}
 		klog.V(4).Infof("Staging path %s is already mounted", stagingTargetPath)
 		return &csi.NodeStageVolumeResponse{}, nil

@@ -99,37 +99,6 @@ func TestVolumeHealthToCSI(t *testing.T) {
 	}
 }
 
-func TestCheckBasicHealth(t *testing.T) {
-	tests := []struct {
-		name       string
-		path       string
-		wantHealth bool // true = healthy, false = unhealthy
-	}{
-		{
-			name:       "existing path",
-			path:       "/tmp",
-			wantHealth: true,
-		},
-		{
-			name:       "non-existing path",
-			path:       "/nonexistent/path/that/does/not/exist/12345",
-			wantHealth: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			health := checkBasicHealth(tt.path)
-			if tt.wantHealth && health.Abnormal {
-				t.Errorf("checkBasicHealth(%q) = unhealthy, want healthy", tt.path)
-			}
-			if !tt.wantHealth && !health.Abnormal {
-				t.Errorf("checkBasicHealth(%q) = healthy, want unhealthy", tt.path)
-			}
-		})
-	}
-}
-
 func TestGetNVMeControllerState(t *testing.T) {
 	// Point the sysfs lookup at a controlled directory so the test does not
 	// depend on which NVMe devices happen to be present on the host runner.
@@ -194,17 +163,17 @@ func TestNVMeControllerNameExtraction(t *testing.T) {
 		{
 			devicePath: "/dev/sda",
 			wantErr:    true,
-			errType:    errNotNVMeDevice,
+			errType:    ErrNVMeNotNVMeDevice,
 		},
 		{
 			devicePath: "/dev/vda",
 			wantErr:    true,
-			errType:    errNotNVMeDevice,
+			errType:    ErrNVMeNotNVMeDevice,
 		},
 		{
 			devicePath: "/dev/xvda",
 			wantErr:    true,
-			errType:    errNotNVMeDevice,
+			errType:    ErrNVMeNotNVMeDevice,
 		},
 	}
 
@@ -225,76 +194,5 @@ func TestNVMeControllerNameExtraction(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestStaticErrors(t *testing.T) {
-	// Verify static errors are properly defined
-	if errReadTimeout == nil {
-		t.Error("errReadTimeout should not be nil")
-	}
-	if errNotNVMeDevice == nil {
-		t.Error("errNotNVMeDevice should not be nil")
-	}
-	if errISCSIStateUnknown == nil {
-		t.Error("errISCSIStateUnknown should not be nil")
-	}
-
-	// Verify error messages are useful
-	if errReadTimeout.Error() == "" {
-		t.Error("errReadTimeout should have a non-empty message")
-	}
-	if errNotNVMeDevice.Error() == "" {
-		t.Error("errNotNVMeDevice should have a non-empty message")
-	}
-	if errISCSIStateUnknown.Error() == "" {
-		t.Error("errISCSIStateUnknown should have a non-empty message")
-	}
-}
-
-func TestVolumeHealthEquality(t *testing.T) {
-	// Test that two Healthy() calls produce equivalent results
-	h1 := Healthy()
-	h2 := Healthy()
-
-	if h1.Abnormal != h2.Abnormal {
-		t.Error("Two Healthy() calls should produce same Abnormal value")
-	}
-	if h1.Message != h2.Message {
-		t.Error("Two Healthy() calls should produce same Message value")
-	}
-
-	// Test Unhealthy with same message
-	u1 := Unhealthy("test error")
-	u2 := Unhealthy("test error")
-
-	if u1.Abnormal != u2.Abnormal {
-		t.Error("Two Unhealthy() calls with same message should produce same Abnormal value")
-	}
-	if u1.Message != u2.Message {
-		t.Error("Two Unhealthy() calls with same message should produce same Message value")
-	}
-}
-
-func TestProtocolConstants(t *testing.T) {
-	// Ensure protocol constants are defined (used by health check routing)
-	if ProtocolNFS == "" {
-		t.Error("ProtocolNFS should not be empty")
-	}
-	if ProtocolNVMeOF == "" {
-		t.Error("ProtocolNVMeOF should not be empty")
-	}
-	if ProtocolISCSI == "" {
-		t.Error("ProtocolISCSI should not be empty")
-	}
-
-	// Ensure they are distinct
-	protocols := map[string]bool{
-		ProtocolNFS:    true,
-		ProtocolNVMeOF: true,
-		ProtocolISCSI:  true,
-	}
-	if len(protocols) != 3 {
-		t.Error("Protocol constants should be distinct")
 	}
 }

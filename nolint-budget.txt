@@ -5,7 +5,7 @@ errchkjson 2
 gocognit 1
 gocritic 2
 gocyclo 2
-gosec 53
+gosec 51
 govet 60
 interfacebloat 1
 mnd 1

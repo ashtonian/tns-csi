@@ -13,6 +13,7 @@ import (
 
 	"github.com/fenio/tns-csi/pkg/driver"
 	"github.com/fenio/tns-csi/pkg/metrics"
+	"github.com/fenio/tns-csi/pkg/volumeprobe"
 	"k8s.io/klog/v2"
 )
 
@@ -57,6 +58,9 @@ func resolveAPIKey(flagValue string, getenv func(string) string) string {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == volumeprobe.HelperArgument {
+		os.Exit(volumeprobe.RunHelper(context.Background(), os.Stdin, os.Stdout))
+	}
 	klog.InitFlags(nil)
 	flag.Parse()
 
