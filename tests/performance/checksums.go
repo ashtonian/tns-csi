@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"math"
@@ -115,11 +114,11 @@ func checksumDigests(manifest Manifest, expected []ExtentChecksum) (map[string][
 	wanted := make(map[string][]byte, len(expected))
 	for _, checksum := range expected {
 		plan, ok := plans[checksum.Plan.Name]
-		if !ok || plan != checksum.Plan || wanted[plan.Name] != nil || len(checksum.SHA256) != sha256.Size*2 {
+		if !ok || plan != checksum.Plan || wanted[plan.Name] != nil {
 			return nil, false
 		}
-		digest, err := hex.DecodeString(checksum.SHA256)
-		if err != nil || hex.EncodeToString(digest) != checksum.SHA256 {
+		digest, valid := decodeSHA256(checksum.SHA256)
+		if !valid {
 			return nil, false
 		}
 		wanted[plan.Name] = digest

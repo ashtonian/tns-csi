@@ -4,6 +4,7 @@ This package validates a finite file-test request, evaluates captured fio output
 preserves supplied captures and verifies their read-back against a trusted receipt.
 It also checks finite extents against independently supplied SHA-256 digests.
 Checksum plans can be retained before writing data and checked before reuse.
+Finalized witness records can be compared with recovery and delivered replies.
 It does not connect to Kubernetes/TrueNAS, run fio, inspect a mount, change
 settings or delete data. Tests use synthetic fixtures, fake process receipts and
 temporary local directories. No production driver behavior changes are included.
@@ -132,6 +133,49 @@ plan before creating data files, reopens both and detects a changed data byte.
 Other controls cover malformed records, substituted manifests/receipts, concurrent
 savers, symlinks and retained evidence. These checks do not prove crash durability.
 
+## Finalized witness reconciliation
+
+`ReconcileWitness(stream, receipt, rawLedger, recovered, replies)` compares a
+finalized witness prefix with independently collected target records. The caller
+supplies the expected run/stream/generation and a separately trusted receipt for
+`<run_id>.witness.json`. The witness finalizer must issue that receipt only after
+reconciling accepted commits, closing the generation to further appends and
+durably retaining the ledger. Computing a receipt from the current ledger cannot
+establish that trust. No witness writer, finalizer or fault controller is included.
+
+Ledger format version 1 requires every `WitnessLedger` field, with a nonempty
+sequence prefix starting at 1 and ending at `final_sequence`. Records bind the
+complete stream identity, sequence, payload offset/length and canonical SHA-256.
+Offsets must be ordered and nonoverlapping; byte arithmetic is checked. The
+strict JSON, exact length/hash and supported-version checks reject torn or
+substituted ledgers before using their observations. Ledgers are capped at 2 MiB
+and 4096 entries; recovered/reply lists are separately capped at 4096 entries.
+
+Recovered records must describe complete independently read and hashed payloads,
+including their actual header identities and offsets. The collector must check
+that required records' stored header checksums agree with computed payload
+checksums and fail collection on required-record read/header errors. Incomplete
+unwitnessed tail bytes need a separate collector report. Records must not be copied
+from expected witness records. The caller owns collection completeness, immutable
+volume identity and read-only access. The helper performs no I/O and cannot prove
+that these observations or finalization claims are truthful.
+
+Every durable ledger entry must match recovery, including an entry whose witness
+commit reply never reached the writer. Missing entries, metadata/hash mismatches,
+conflicting replies and duplicate recovered sequences fail. Identical reply
+retries count once. A reply outside the finalized ledger fails; replies are
+reported separately and cannot shrink the required recovery set. Recovered
+sequences beyond the durable prefix are reported as a sorted unwitnessed tail.
+They cannot overlap the prefix or each other and never add verified bytes.
+
+`VerifiedRecords` preserves matching prefix coverage on comparison failures;
+aggregate `VerifiedBytes` remains null unless the complete comparison passes.
+The byte total counts witnessed payload bytes only.
+Invalid ledgers or malformed record sets expose no trusted coverage. Findings
+use stable codes and sequence numbers without echoing hashes or free-form input.
+PASS covers this comparison only; process drain, writer exclusion, actual fsync
+durability, witness storage and live fault qualification remain separate gates.
+
 ## Capture retention
 
 `NewEvidenceStore` takes a validated manifest and a caller-selected `*os.Root`
@@ -249,6 +293,7 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Part of Q12/Q13/Q14 | Per-job counts, distinct plans/options, finite SHA-256 extent checks and independently receipted checksum plans; scratch corruption/short-read controls | Independent reader/source identity, trusted receipt custody, write/read process ordering and lab integration |
 | Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
 | Part of Q17 | Exclusive run reservation/capture writes and independent receipt-based read-back; no overwrite or automatic retry/cleanup | Trusted receipt retention, audited exact-resource cleanup and crash reconciliation |
+| Part of fault-durability evidence | Receipt-authenticated finalized witness comparison, lost-reply recovery and separate unwitnessed-tail accounting | Durable witness writer/finalizer, complete target collection, ownership/fault admission and live durability qualification |
 | Q04/Q05/Q07/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, XFS tools and raw-block regression |
 
 All B/I/L/F/H/A/U/C target scenarios, runtime images, durability witness,
@@ -337,3 +382,12 @@ scratch data and detect corruption after reopening; altered plans, mismatched
 manifests, symlinks and concurrent saves are rejected. No dedicated fuzz test or
 session was added/run. Production code, dependencies and coverage policy are
 unchanged; production coverage was not repeated locally.
+
+The finalized-witness slice passed Go 1.26.2 focused shuffled race tests on
+Darwin/Linux, complete `make check` (80/80 CSI sanity cases), the unchanged
+nolint budget (283 pairs) and diff checks. Controls cover lost replies, missing
+durable entries, exact retry accounting, conflicting records, separate tail
+coverage and invalid finalized evidence. No dedicated fuzz test/session was
+added/run. Production code, dependencies and coverage policy are unchanged;
+production coverage was not repeated locally. These are offline comparison
+checks; no witness service, target collector or fault was run.

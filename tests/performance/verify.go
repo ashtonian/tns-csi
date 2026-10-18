@@ -115,11 +115,22 @@ func validReceipt(receipt ArtifactReceipt, name string, limit int) bool {
 	if limit < 0 {
 		return false
 	}
-	if receipt.Name != name || receipt.Bytes > uint64(limit) || len(receipt.SHA256) != sha256.Size*2 {
+	if receipt.Name != name || receipt.Bytes > uint64(limit) {
 		return false
 	}
-	hash, err := hex.DecodeString(receipt.SHA256)
-	return err == nil && hex.EncodeToString(hash) == receipt.SHA256
+	_, valid := decodeSHA256(receipt.SHA256)
+	return valid
+}
+
+func decodeSHA256(value string) ([]byte, bool) {
+	if len(value) != sha256.Size*2 {
+		return nil, false
+	}
+	hash, err := hex.DecodeString(value)
+	if err != nil || hex.EncodeToString(hash) != value {
+		return nil, false
+	}
+	return hash, true
 }
 
 func readArtifact(directory *os.File, receipt ArtifactReceipt, limit int) ([]byte, error) {
