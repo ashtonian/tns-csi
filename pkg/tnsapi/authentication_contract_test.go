@@ -497,32 +497,77 @@ func TestModernInitialRetryPreservesOptions(t *testing.T) {
 	}
 }
 
-func TestModernRPCPermissionDoesNotReauthenticate(t *testing.T) {
-	server := newMockWSServer()
-	t.Cleanup(server.Close)
-	var auth, queries atomic.Int32
-	server.handler = func(conn *websocket.Conn) {
-		serveMockRequests(conn, func(req Request) []Response {
-			if isAuthMethod(req.Method) {
-				auth.Add(1)
-				assertAuthRequest(t, req, true)
-				return []Response{{ID: req.ID, Result: json.RawMessage(`{"response_type":"SUCCESS"}`)}}
-			}
-			queries.Add(1)
-			return []Response{{ID: req.ID, Error: &Error{ErrorName: "EACCES", Reason: "query requires a different role"}}}
-		})
-	}
-	c, err := NewClient(server.URL(), "fixture-key", false, authTestOptions(true)...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { cleanupClient(c) })
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	err = c.Call(ctx, "pool.dataset.query", nil, nil)
-	var apiErr *Error
-	if !errors.As(err, &apiErr) || apiErr.ErrorName != "EACCES" || auth.Load() != 1 || queries.Load() != 1 {
-		t.Fatalf("error=%v auth=%d queries=%d", err, auth.Load(), queries.Load())
+func TestRPCPermissionDoesNotReauthenticate(t *testing.T) {
+	for _, modern := range []bool{false, true} {
+		for _, nested := range []bool{false, true} {
+			t.Run(fmt.Sprintf("modern=%t/nested=%t", modern, nested), func(t *testing.T) {
+				server := newMockWSServer()
+				t.Cleanup(server.Close)
+				var auth, denied, allowed atomic.Int32
+				server.handler = func(conn *websocket.Conn) {
+					serveMockRequests(conn, func(req Request) []Response {
+						if isAuthMethod(req.Method) {
+							auth.Add(1)
+							assertAuthRequest(t, req, modern)
+							result := `true`
+							if modern {
+								result = `{"response_type":"SUCCESS"}`
+							}
+							return []Response{{ID: req.ID, Result: json.RawMessage(result)}}
+						}
+						if req.Method == "system.product_type" {
+							allowed.Add(1)
+							return []Response{{ID: req.ID, Result: json.RawMessage(`"SCALE"`)}}
+						}
+						if req.Method != "system.advanced.config" {
+							t.Errorf("unexpected RPC %s", req.Method)
+						}
+						denied.Add(1)
+						apiErr := &Error{ErrorName: "EACCES", ErrorCode: 13, Reason: "query requires a different role"}
+						if nested {
+							apiErr = &Error{Code: -32001, Message: "CallError", Data: &ErrorData{ErrorName: "EACCES", Error: 13, Reason: "query requires a different role"}}
+						}
+						return []Response{{ID: req.ID, Error: apiErr}}
+					})
+				}
+				c, err := NewClient(server.URL(), "fixture-key", false, authTestOptions(modern)...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { cleanupClient(c) })
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var wg sync.WaitGroup
+				for range 8 {
+					wg.Go(func() {
+						err := c.Call(ctx, "system.advanced.config", nil, nil)
+						var apiErr *Error
+						if !errors.As(err, &apiErr) {
+							t.Errorf("error=%v; want RPC permission error", err)
+							return
+						}
+						if nested {
+							if apiErr.Data == nil || apiErr.Data.ErrorName != "EACCES" || apiErr.Data.Error != 13 {
+								t.Errorf("nested permission error lost: %v", err)
+							}
+						} else if apiErr.ErrorName != "EACCES" || apiErr.ErrorCode != 13 {
+							t.Errorf("top-level permission error lost: %v", err)
+						}
+						if errors.Is(err, ErrAuthenticationRejected) || errors.Is(err, ErrAuthenticationDenied) {
+							t.Errorf("RPC permission error classified as login rejection: %v", err)
+						}
+					})
+				}
+				wg.Wait()
+				var product string
+				if err := c.Call(ctx, "system.product_type", nil, &product); err != nil || product != "SCALE" {
+					t.Fatalf("session unusable after permission denial: result=%q error=%v", product, err)
+				}
+				if auth.Load() != 1 || denied.Load() != 8 || allowed.Load() != 1 {
+					t.Fatalf("auth=%d denied=%d allowed=%d; want one login and no RPC replay", auth.Load(), denied.Load(), allowed.Load())
+				}
+			})
+		}
 	}
 }
 
