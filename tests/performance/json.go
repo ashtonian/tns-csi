@@ -12,6 +12,13 @@ import (
 
 var errJSON = errors.New("invalid JSON document")
 
+const (
+	maxManifestBytes = 1 << 20
+	maxFioBytes      = 32 << 20
+	maxProcessBytes  = 4 << 10
+	maxIndexBytes    = 8 << 20
+)
+
 // checkJSON rejects ambiguous keys before encoding/json can silently replace them.
 func checkJSON(data []byte, limit int) error {
 	if len(data) > limit {
@@ -34,19 +41,38 @@ func checkJSON(data []byte, limit int) error {
 
 // checkShape makes request fields mandatory and case-sensitive, including zero offsets.
 func checkShape(data []byte, shape reflect.Type) error {
+	return checkTypedShape(data, shape, false)
+}
+
+func checkTypedShape(data []byte, shape reflect.Type, nullable bool) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		if nullable && (shape.Kind() == reflect.Pointer || shape.Kind() == reflect.Slice || shape.Kind() == reflect.Map) {
+			return nil
+		}
 		return errJSON
 	}
 	switch shape.Kind() {
 	case reflect.Struct:
-		return checkStruct(data, shape)
+		return checkStruct(data, shape, nullable)
+	case reflect.Pointer:
+		return checkTypedShape(data, shape.Elem(), nullable)
+	case reflect.Map:
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return errJSON
+		}
+		for _, field := range fields {
+			if err := checkTypedShape(field, shape.Elem(), nullable); err != nil {
+				return err
+			}
+		}
 	case reflect.Slice:
 		var items []json.RawMessage
 		if err := json.Unmarshal(data, &items); err != nil {
 			return errJSON
 		}
 		for _, item := range items {
-			if err := checkShape(item, shape.Elem()); err != nil {
+			if err := checkTypedShape(item, shape.Elem(), nullable); err != nil {
 				return err
 			}
 		}
@@ -55,20 +81,28 @@ func checkShape(data []byte, shape reflect.Type) error {
 	return nil
 }
 
-func checkStruct(data []byte, shape reflect.Type) error {
+func checkStruct(data []byte, shape reflect.Type, nullable bool) error {
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil || len(fields) != shape.NumField() {
+	if err := json.Unmarshal(data, &fields); err != nil {
 		return errJSON
 	}
 	for i := range shape.NumField() {
 		field := shape.Field(i)
-		value, ok := fields[field.Tag.Get("json")]
+		name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+		value, ok := fields[name]
 		if !ok {
+			if nullable && options == "omitempty" {
+				continue
+			}
 			return errJSON
 		}
-		if err := checkShape(value, field.Type); err != nil {
+		if err := checkTypedShape(value, field.Type, nullable); err != nil {
 			return err
 		}
+		delete(fields, name)
+	}
+	if len(fields) != 0 {
+		return errJSON
 	}
 	return nil
 }

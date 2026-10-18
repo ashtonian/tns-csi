@@ -85,7 +85,7 @@ type JobPlan struct {
 // DecodeManifest accepts one strict JSON object without returning raw parse errors.
 func DecodeManifest(data []byte) (Manifest, error) {
 	var manifest Manifest
-	if err := checkJSON(data, 1<<20); err != nil {
+	if err := checkJSON(data, maxManifestBytes); err != nil {
 		return manifest, ErrInvalidManifest
 	}
 	if err := checkShape(data, reflect.TypeFor[Manifest]()); err != nil {

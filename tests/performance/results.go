@@ -64,9 +64,9 @@ type IOStats struct {
 
 // Latency preserves nanosecond statistics and per-job percentile values.
 type Latency struct {
-	Samples     *uint64           `json:"N"`
-	Mean        *float64          `json:"mean"`
-	Percentiles map[string]uint64 `json:"percentile"`
+	Samples     *uint64            `json:"N"`
+	Mean        *float64           `json:"mean"`
+	Percentiles map[string]*uint64 `json:"percentile"`
 }
 
 type fioOutput struct {
@@ -95,7 +95,7 @@ func EvaluateFio(manifest Manifest, process ProcessReceipt, raw []byte) Evaluati
 		return result
 	}
 	result.checkProcess(process)
-	if err := checkJSON(raw, 32<<20); err != nil {
+	if err := checkJSON(raw, maxFioBytes); err != nil {
 		result.reject("OUTPUT_INVALID", nil)
 		return result
 	}
@@ -161,8 +161,8 @@ func (e *Evaluation) checkJobs(manifest Manifest, jobs []fioJob) {
 		e.Jobs = append(e.Jobs, JobObservation{Name: manifest.Jobs[index].Name, Read: job.Read, Write: job.Write, Trim: job.Trim})
 		e.checkDirections(manifest.Phase, manifest.Jobs[index], job, index)
 	}
-	for name, index := range expected {
-		if !seen[name] {
+	for index, plan := range manifest.Jobs {
+		if !seen[plan.Name] {
 			e.reject("OUTPUT_INVALID", &index)
 		}
 	}
@@ -191,9 +191,9 @@ func validLatency(latency *Latency) bool {
 	if latency.Samples == nil || (latency.Mean != nil && *latency.Mean < 0) {
 		return false
 	}
-	for percentile := range latency.Percentiles {
+	for percentile, nanos := range latency.Percentiles {
 		value, err := strconv.ParseFloat(percentile, 64)
-		if err != nil || !(value > 0 && value <= 100) || *latency.Samples == 0 {
+		if err != nil || !(value > 0 && value <= 100) || *latency.Samples == 0 || nanos == nil {
 			return false
 		}
 	}

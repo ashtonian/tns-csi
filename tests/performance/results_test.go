@@ -76,7 +76,7 @@ func TestEvaluateFioHealthyAndMissingOptionalMetrics(t *testing.T) {
 	if result.Jobs[1].Write.BytesPerSecond != nil || result.Jobs[1].Write.CompletionLatency != nil {
 		t.Fatal("missing optional metrics became zero values")
 	}
-	if result.Jobs[0].Write.CompletionLatency.Percentiles["99.000000"] != 1100 {
+	if value := result.Jobs[0].Write.CompletionLatency.Percentiles["99.000000"]; value == nil || *value != 1100 {
 		t.Fatal("per-job nanosecond percentile was not preserved")
 	}
 	if !bytes.Equal(raw, before) {
@@ -241,6 +241,7 @@ func TestEvaluateFioRejectsMalformedMetricsWithoutEcho(t *testing.T) {
 		"non-numeric percentile": {"clat_ns": map[string]any{"N": 1, "percentile": map[string]uint64{sentinel: 1}}},
 		"invalid percentile":     {"clat_ns": map[string]any{"N": 1, "percentile": map[string]uint64{"101": 1}}},
 		"NaN percentile":         {"clat_ns": map[string]any{"N": 1, "percentile": map[string]uint64{"NaN": 1}}},
+		"null percentile":        {"clat_ns": map[string]any{"N": 1, "percentile": map[string]any{"99.000000": nil}}},
 		"no percentile samples":  {"clat_ns": map[string]any{"N": 0, "percentile": map[string]uint64{"99": 1}}},
 	} {
 		t.Run(name, func(t *testing.T) {

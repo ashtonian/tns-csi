@@ -1,7 +1,8 @@
 # Offline performance evidence
 
-This package validates a finite file-test request, evaluates captured fio output
-and preserves supplied captures in an explicit evidence directory. It does not
+This package validates a finite file-test request, evaluates captured fio output,
+preserves supplied captures and verifies their read-back against a trusted receipt.
+It does not
 connect to Kubernetes/TrueNAS, run fio, inspect a mount, change settings or delete
 data. Tests use synthetic fixtures, fake process receipts and temporary local
 directories. No production driver behavior changes are included.
@@ -53,6 +54,7 @@ process receipt even when evaluation fails. The evaluator:
   hide an absent job or activity in an unexpected direction.
 - Preserves missing optional rates/latencies as null and nanosecond percentiles
   per job. Invalid metric values fail; percentiles are never averaged or pooled.
+  An explicitly null percentile sample fails instead of becoming zero.
 
 `PASS` means only that this offline process/output/byte-accounting evaluation
 passed. `verified_bytes` always remains null: counters and reported options do
@@ -101,6 +103,47 @@ contracts. Tests cover concurrent reservation/recording, file/symlink collisions
 directory renames, failed output retention and injected short-write/sync/close
 failures on scratch evidence files only.
 
+## Independent read-back
+
+`VerifyEvidence(root, indexReceipt)` reads the retained files without changing
+them. Supply the index receipt returned by `RecordCapture` through a separately
+trusted channel. Computing an expected receipt from the current index cannot
+detect replacement of that index and its inputs. These hashes establish
+consistency with the supplied receipt; they do not authenticate the collector
+or prove its process observations, filesystem crash durability or storage results.
+
+Capture-index version 1 identifies both its JSON format and evaluation rules,
+independently of manifest schema 1. The saved index requires `index: null`; its
+own receipt remains separate. Unversioned indexes and unsupported versions fail
+explicitly. Future changes to evaluation semantics need a new version or an
+explicit version-specific evaluator. There is no automatic migration.
+
+The verifier requires exactly four uniquely named receipts for the same run's
+manifest, stdout, stderr and process record. It checks private regular files,
+exact lengths and hashes, required record fields/types and manifest/run identity,
+then recomputes the complete fio evaluation. Missing process booleans, ambiguous
+JSON keys and saved/recomputed disagreement fail. A saved PASS or invented
+`verified_bytes` cannot replace this check. Correctly retained failing fio output
+or an unknown exit can verify with a nil error while the evaluation remains FAIL.
+
+Reads are limited to 1 MiB for manifests, 32 MiB each for stdout/stderr, 4 KiB
+for process records and 8 MiB for indexes. Oversized streams remain preserved
+unchanged by the writer, with incomplete-evidence failure; they cannot pass
+read-back. Oversized manifests are refused before reservation. If an index
+cannot be finalized, already-written evidence stays intact.
+
+Linux and Darwin use native descriptor-relative no-follow opens. Symlinks are
+refused even when their target matches the receipt, and nonblocking open avoids
+waiting for a FIFO writer. Other platforms return `ErrEvidencePlatform`; there
+is no weaker fallback. A pinned directory handle survives renames. These checks
+do not impose an I/O deadline or prevent another authorized process modifying
+files after verification; the caller owns directory security and writer exclusion.
+
+On rejection, the verifier returns a sanitized error and a fresh failing result
+without unverified observations. It performs no repair, retry, overwrite or
+cleanup. Tests use synthetic captures and temporary evidence files, including
+altered/missing files, forged conclusions, symlinks, FIFOs and renamed directories.
+
 ## Reviewed fio format and fixture provenance
 
 The initial format is exactly `fio-3.39`, reviewed against upstream
@@ -130,10 +173,10 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Q01, part of Q03/Q06 | Expected/observed immutable tuple comparison and required fields | Independent collectors, source scope/freshness, device generation and actual mount checks |
 | Part of Q02 | Component-boundary/lexical path rejection; evidence writes pinned to a private directory handle with exclusive file creation | Workload path symlink handling and mount check/use races |
 | Q08 | Per-file totals/headroom, buffer lower bound, overflow and alignment | Actual PVC/pool capacity and memory/overhead observations |
-| Q09/Q10/Q11 | Every job/error, document completeness, optional metrics and integer preservation | Real sanitized success/error captures and required-metric scenario policy |
+| Q09/Q10/Q11 | Every job/error, document completeness, optional metrics, explicit-null percentile rejection and integer preservation | Real sanitized success/error captures and required-metric scenario policy |
 | Part of Q12/Q13 | Per-job counts, distinct file plans and reported options | Independent exact-extent/checksum verification across processes |
 | Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
-| Part of Q17 | Exclusive run reservation and capture writes; no overwrite or automatic retry/cleanup | Audited exact-resource cleanup and crash reconciliation |
+| Part of Q17 | Exclusive run reservation/capture writes and independent receipt-based read-back; no overwrite or automatic retry/cleanup | Trusted receipt retention, audited exact-resource cleanup and crash reconciliation |
 | Q04/Q05/Q07/Q14/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, actual corruption detection, XFS tools and raw-block regression |
 
 All B/I/L/F/H/A/U/C target scenarios, actual scratch-file corruption, runtime
@@ -187,3 +230,14 @@ focused lint, `make check` (including 80 sanity cases), the nolint budget and
 diff checks. Production source/dependencies and the coverage policy did not
 change; the production coverage gate was not repeated for capture retention.
 These results do not constitute scratch workload or target qualification.
+
+The read-back slice passed Go 1.26.2 shuffled race tests on darwin/arm64 (93.1%
+helper coverage) and linux/arm64 (92.8%), focused/repository lint, `make check`
+(80 sanity cases), the unchanged nolint budget and diff checks. All three fuzz
+targets passed separate five-second runs with two workers. The unsupported-
+platform path compiled for windows/amd64; Windows tests were not executed.
+The explicit-null percentile regression fails against published commit
+`2295970618d50c864e03a31943c99b0d58131803` and passes with this correction.
+Linux used the same pinned disposable container/source-stream setup above.
+Production code, module versions and coverage policy are unchanged; the
+production coverage gate was not repeated for this offline slice.

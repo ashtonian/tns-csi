@@ -10,6 +10,9 @@ import (
 )
 
 const (
+	// EvidenceVersion identifies the capture index format, independently of the manifest.
+	EvidenceVersion = 1
+
 	artifactManifest = "manifest"
 	artifactStdout   = "stdout"
 	artifactStderr   = "stderr"
@@ -46,9 +49,10 @@ type CapturedProcess struct {
 
 // CaptureResult includes the final index receipt separately to avoid a self hash.
 type CaptureResult struct {
-	Index      *ArtifactReceipt  `json:"index"`
-	Artifacts  []ArtifactReceipt `json:"artifacts"`
-	Evaluation Evaluation        `json:"evaluation"`
+	Index         *ArtifactReceipt  `json:"index"`
+	Artifacts     []ArtifactReceipt `json:"artifacts"`
+	Evaluation    Evaluation        `json:"evaluation"`
+	SchemaVersion uint64            `json:"schema_version"`
 }
 
 // EvidenceStore records one capture in a caller-owned private directory.
@@ -102,6 +106,9 @@ func (s *EvidenceStore) reserve() error {
 	if err != nil {
 		return ErrEvidenceIncomplete
 	}
+	if len(raw) > maxManifestBytes {
+		return ErrInvalidManifest
+	}
 	s.started, err = s.persist(artifactManifest, raw)
 	return err
 }
@@ -119,9 +126,9 @@ func (s *EvidenceStore) RecordCapture(capture CapturedProcess) (CaptureResult, e
 		return failedCapture(), ErrCaptureRecorded
 	}
 	s.recorded = true
-	result := CaptureResult{Evaluation: EvaluateFio(s.manifest, capture.Process, capture.Stdout)}
+	result := CaptureResult{SchemaVersion: EvidenceVersion, Evaluation: EvaluateFio(s.manifest, capture.Process, capture.Stdout)}
 	result.Artifacts = append(result.Artifacts, s.started)
-	failed := false
+	failed := len(capture.Stdout) > maxFioBytes || len(capture.Stderr) > maxFioBytes
 	for _, stream := range []struct {
 		kind string
 		data []byte
@@ -151,6 +158,9 @@ func (s *EvidenceStore) RecordCapture(capture CapturedProcess) (CaptureResult, e
 	}
 	index, err := json.Marshal(result)
 	if err != nil {
+		return failedResult(result), ErrEvidenceIncomplete
+	}
+	if len(index) > maxIndexBytes {
 		return failedResult(result), ErrEvidenceIncomplete
 	}
 	receipt, err := s.persist(artifactResult, index)
@@ -252,6 +262,7 @@ func failedCapture() CaptureResult {
 }
 
 func failedResult(result CaptureResult) CaptureResult {
+	result.SchemaVersion = EvidenceVersion
 	result.Evaluation.reject("EVIDENCE_INCOMPLETE", nil)
 	return result
 }
