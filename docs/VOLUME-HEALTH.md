@@ -62,6 +62,12 @@ or complete normal staging to establish the binding. Corrupt or conflicting
 metadata refuses the observation. Parent symlinks are resolved inside a bounded
 helper, and the parent checks the resulting mount-table identity again.
 
+Raw block volumes use a bounded metadata-only preflight to identify the device
+before capturing namespace/controller state. The capacity result must refer to
+that same device, and namespace identity is checked again afterward. Changed
+device numbers, device types or namespaces return unavailable. A raw device whose
+identity was not established before observation also refuses the request.
+
 `NodeGetVolumeStats` shares the probe limits and returns observed fd-based
 capacity/inode counters. It returns errors on failed or inconsistent observations.
 For raw block devices, capacity comes from the device's sysfs sector count;
@@ -98,8 +104,9 @@ automatic repair, log erasure, reformatting or ownership takeover is enabled.
 Application-path operations run in a private mode of the driver executable,
 before API initialization, with a sanitized environment. Each helper has a
 three-second deadline; caller cancellation can end the RPC sooner. Input is
-limited to 32 KiB and output buffers to 8 KiB. A symlink-resolution helper and
-the observation helper run sequentially under the same admission rules.
+limited to 32 KiB and output buffers to 8 KiB. Path resolution precedes observation
+for symlinked paths and devtmpfs/tmpfs mounts. Each phase has its own helper
+deadline and uses the same admission rules.
 
 At most four probes run per host state directory, with one per volume ID. Kernel
 flock leases live under `/var/lib/tns-csi/health-probes`, on the existing persistent

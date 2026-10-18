@@ -28,7 +28,7 @@ override:
   - path: ^pkg/driver$
     threshold: 56
   - path: ^pkg/volumeprobe$
-    threshold: 80
+    threshold: 82
   - path: ^pkg/tnsapi$
     threshold: 38
   - path: ^pkg/retry$

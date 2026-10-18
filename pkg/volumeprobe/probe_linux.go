@@ -41,6 +41,10 @@ func observe(ctx context.Context, request Request, leases []*os.File) Result {
 }
 
 func resolveMount(ctx context.Context, path string) Result {
+	return resolveMountWithStat(ctx, path, unix.Stat)
+}
+
+func resolveMountWithStat(ctx context.Context, path string, statPath func(string, *unix.Stat_t) error) Result {
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return Result{Code: classifyError(err)}
@@ -49,14 +53,18 @@ func resolveMount(ctx context.Context, path string) Result {
 	if err != nil {
 		return Result{Code: Unknown}
 	}
+	var stat unix.Stat_t
+	if statErr := statPath(canonical, &stat); statErr != nil {
+		return Result{Code: classifyError(statErr)}
+	}
 	mountPath := canonical
-	raw := false
+	raw := stat.Mode&unix.S_IFMT == unix.S_IFBLK
+	rawDevice := ""
+	if raw {
+		rawDevice = fmt.Sprintf("%d:%d", unix.Major(stat.Rdev), unix.Minor(stat.Rdev))
+	}
 	if !mounted {
-		info, statErr := os.Stat(canonical)
-		if statErr != nil {
-			return Result{Code: classifyError(statErr)}
-		}
-		if info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
+		if !raw {
 			return Result{Code: Missing}
 		}
 		mountPath, err = containingMount(canonical)
@@ -64,12 +72,11 @@ func resolveMount(ctx context.Context, path string) Result {
 			return Result{Code: Unknown}
 		}
 		entry, mounted, err = mount.MountedEntryLexical(ctx, mountPath)
-		raw = true
 	}
 	if err != nil || !mounted {
 		return Result{Code: Unknown}
 	}
-	return Result{Code: OK, Mount: &ResolvedMount{Path: mountPath, Source: entry.Source, Filesystem: entry.FSType, Device: entry.Device, MountID: entry.MountID, Raw: raw}}
+	return Result{Code: OK, RawDevice: rawDevice, Mount: &ResolvedMount{Path: mountPath, Source: entry.Source, Filesystem: entry.FSType, Device: entry.Device, MountID: entry.MountID, Raw: raw}}
 }
 
 func containingMount(path string) (string, error) {

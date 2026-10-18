@@ -168,6 +168,44 @@ func TestLinuxMountResolutionIsBoundedAndExact(t *testing.T) {
 	}
 }
 
+func TestLinuxMountResolutionCapturesRawIdentityBeforeObservation(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "raw-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", file.Name()} {
+		result := resolveMountWithStat(context.Background(), path, func(actual string, stat *unix.Stat_t) error {
+			if actual != path {
+				t.Errorf("statted %q, want %q", actual, path)
+			}
+			*stat = unix.Stat_t{Mode: unix.S_IFBLK, Rdev: unix.Mkdev(259, 0)}
+			return nil
+		})
+		if result.Code != OK || result.RawDevice != "259:0" || result.Mount == nil || !result.Mount.Raw || result.Mount.MountID <= 0 {
+			t.Fatalf("raw resolution %q: %+v", path, result)
+		}
+	}
+	for _, test := range []struct {
+		err  error
+		code string
+	}{{unix.EIO, IOFailure}, {os.ErrNotExist, Missing}, {unix.EACCES, Unknown}} {
+		result := resolveMountWithStat(context.Background(), "/", func(string, *unix.Stat_t) error { return test.err })
+		if result.Code != test.code || result.RawDevice != "" || result.Mount != nil {
+			t.Fatalf("failed raw stat: %+v", result)
+		}
+	}
+	result := resolveMountWithStat(context.Background(), file.Name(), func(_ string, stat *unix.Stat_t) error {
+		*stat = unix.Stat_t{Mode: unix.S_IFCHR, Rdev: unix.Mkdev(1, 3)}
+		return nil
+	})
+	if result.Code != Missing || result.RawDevice != "" {
+		t.Fatalf("character device became a raw volume: %+v", result)
+	}
+}
+
 func TestRawCapacityAndSCSIStateRequireValidEvidence(t *testing.T) {
 	for _, data := range []string{"", "0", "-1", "not-a-number", "18446744073709551615", strings.Repeat("1", 65)} {
 		if result := parseRawCapacity([]byte(data), "8:0"); result.Code != Unknown {

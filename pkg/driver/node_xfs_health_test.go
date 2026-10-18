@@ -209,16 +209,109 @@ func TestRawBlockStatsOmitFilesystemUsage(t *testing.T) {
 	s, path := xfsHealthFixture(t)
 	writeNVMeFixtureValue(t, filepath.Join(sysBlockPath, "nvme4n1", "dev"), "259:1")
 	fakeHealthDeviceIndex(t, map[string]string{"259:0": filepath.Join(sysBlockPath, "nvme0n1")})
+	entry := mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}
 	s.healthMountFn = func(context.Context, string) (mount.Entry, bool, error) {
-		return mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}, true, nil
+		return entry, true, nil
 	}
-	s.healthProbeFn = func(context.Context, string, volumeprobe.Request) (volumeprobe.Result, error) {
+	s.healthProbeFn = func(_ context.Context, _ string, request volumeprobe.Request) (volumeprobe.Result, error) {
+		if request.ResolveMount {
+			return rawHealthResolution(path, entry, "259:0"), nil
+		}
 		return volumeprobe.Result{Code: volumeprobe.OK, RawDevice: "259:0", StagingNQN: nqnA, TotalBytes: 4096}, nil
 	}
 	response, err := s.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{VolumeId: "v", VolumePath: path, StagingTargetPath: path})
 	if err != nil || len(response.GetUsage()) != 1 || response.Usage[0].Total != 4096 || response.Usage[0].Used != 0 || response.Usage[0].Available != 0 {
 		t.Fatalf("raw stats: %+v %v", response, err)
 	}
+}
+
+func TestRawNVMeHealthRejectsNamespaceReplacementDuringProbe(t *testing.T) {
+	for _, change := range []string{"uuid", "device-number", "directory", "source"} {
+		t.Run(change, func(t *testing.T) {
+			service, path := xfsHealthFixture(t)
+			fakeHealthDeviceIndex(t, map[string]string{"259:0": filepath.Join(sysBlockPath, "nvme0n1")})
+			entry := mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}
+			service.healthMountFn = func(context.Context, string) (mount.Entry, bool, error) { return entry, true, nil }
+			service.healthProbeFn = func(_ context.Context, _ string, request volumeprobe.Request) (volumeprobe.Result, error) {
+				if request.ResolveMount {
+					return rawHealthResolution(path, entry, "259:0"), nil
+				}
+				result := volumeprobe.Result{Code: volumeprobe.OK, RawDevice: "259:0", StagingNQN: nqnA, TotalBytes: 4096}
+				switch change {
+				case "uuid":
+					writeNVMeFixtureValue(t, filepath.Join(sysBlockPath, "nvme0n1", "uuid"), "22222222-2222-2222-2222-222222222222")
+				case "device-number":
+					result.RawDevice = "259:1"
+				case "directory":
+					result.RawDevice = ""
+				case "source":
+					device := filepath.Join(t.TempDir(), "sda")
+					writeNVMeFixtureValue(t, filepath.Join(device, "dev"), "259:0")
+					index := filepath.Join(sysDevBlockHealthPath, "259:0")
+					if err := os.Remove(index); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(device, index); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return result, nil
+			}
+			response, err := service.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{VolumeId: "v", VolumePath: path, StagingTargetPath: path})
+			if status.Code(err) != codes.Unavailable || response != nil {
+				t.Fatalf("raw %s replacement was accepted: %+v %v", change, response, err)
+			}
+		})
+	}
+}
+
+func TestRawNVMeHealthRefusesUnknownControllerBeforeCapacityProbe(t *testing.T) {
+	service, path := xfsHealthFixture(t)
+	fakeHealthDeviceIndex(t, map[string]string{"259:0": filepath.Join(sysBlockPath, "nvme0n1")})
+	writeNVMeFixtureValue(t, filepath.Join(filepath.Dir(sysBlockPath), "owners", "nvme7", "state"), "")
+	entry := mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}
+	service.healthMountFn = func(context.Context, string) (mount.Entry, bool, error) { return entry, true, nil }
+	service.healthProbeFn = func(_ context.Context, _ string, request volumeprobe.Request) (volumeprobe.Result, error) {
+		if !request.ResolveMount {
+			t.Fatal("capacity probe started before raw transport identity was known")
+		}
+		return rawHealthResolution(path, entry, "259:0"), nil
+	}
+	if _, err := service.NodeGetVolumeHealth(context.Background(), &csi.NodeGetVolumeHealthRequest{VolumeId: "v", StagingTargetPath: path}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("unknown raw controller: %v", err)
+	}
+}
+
+func TestRawHealthPreflightRequiresConsistentDeviceType(t *testing.T) {
+	for _, change := range []string{"missing-number", "invalid-number", "wrong-type"} {
+		t.Run(change, func(t *testing.T) {
+			service, path := xfsHealthFixture(t)
+			entry := mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}
+			service.healthMountFn = func(context.Context, string) (mount.Entry, bool, error) { return entry, true, nil }
+			service.healthProbeFn = func(_ context.Context, _ string, request volumeprobe.Request) (volumeprobe.Result, error) {
+				if !request.ResolveMount {
+					t.Fatal("capacity probe started with inconsistent raw identity")
+				}
+				result := rawHealthResolution(path, entry, "259:0")
+				switch change {
+				case "missing-number":
+					result.RawDevice = ""
+				case "invalid-number":
+					result.RawDevice = "../device"
+				case "wrong-type":
+					result.Mount.Raw = false
+				}
+				return result, nil
+			}
+			if _, err := service.NodeGetVolumeHealth(context.Background(), &csi.NodeGetVolumeHealthRequest{VolumeId: "v", StagingTargetPath: path}); status.Code(err) != codes.Unavailable {
+				t.Fatalf("inconsistent raw identity: %v", err)
+			}
+		})
+	}
+}
+
+func rawHealthResolution(path string, entry mount.Entry, device string) volumeprobe.Result {
+	return volumeprobe.Result{Code: volumeprobe.OK, RawDevice: device, Mount: &volumeprobe.ResolvedMount{Path: path, Source: entry.Source, Filesystem: entry.FSType, Device: entry.Device, MountID: entry.MountID, Raw: true}}
 }
 
 func TestHealthResolvesParentSymlinksInsideProbe(t *testing.T) {
@@ -333,10 +426,14 @@ func TestNonNVMeRawStatsDoNotReadUnrelatedNamespaces(t *testing.T) {
 	fakeHealthDeviceIndex(t, map[string]string{"8:0": device})
 	service := NewNodeService("test", nil, false, nil, false, 1)
 	service.nvmePolicyDirectory = t.TempDir()
+	entry := mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}
 	service.healthMountFn = func(context.Context, string) (mount.Entry, bool, error) {
-		return mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}, true, nil
+		return entry, true, nil
 	}
-	service.healthProbeFn = func(context.Context, string, volumeprobe.Request) (volumeprobe.Result, error) {
+	service.healthProbeFn = func(_ context.Context, _ string, request volumeprobe.Request) (volumeprobe.Result, error) {
+		if request.ResolveMount {
+			return rawHealthResolution("/raw-volume", entry, "8:0"), nil
+		}
 		return volumeprobe.Result{Code: volumeprobe.OK, RawDevice: "8:0", TotalBytes: 4096}, nil
 	}
 	response, err := service.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{VolumeId: "v", VolumePath: "/raw-volume"})
@@ -382,5 +479,18 @@ func fakeHealthDeviceIndex(t *testing.T, devices map[string]string) {
 		if err := os.Symlink(path, filepath.Join(sysDevBlockHealthPath, number)); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestRawHealthDeviceIndexRefusesUnsupportedNVMeNames(t *testing.T) {
+	for _, name := range []string{"nvme0n1p1", "nvme0c7n1"} {
+		t.Run(name, func(t *testing.T) {
+			device := filepath.Join(t.TempDir(), name)
+			writeNVMeFixtureValue(t, filepath.Join(device, "dev"), "259:0")
+			fakeHealthDeviceIndex(t, map[string]string{"259:0": device})
+			if source, err := nvmeDeviceForHealthNumber("259:0"); !errors.Is(err, ErrNVMeIdentityConflict) || source != "" {
+				t.Fatalf("unsupported NVMe name treated as a non-NVMe device: %q %v", source, err)
+			}
+		})
 	}
 }

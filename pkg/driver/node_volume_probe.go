@@ -49,13 +49,13 @@ func (s *NodeService) probeMountedVolume(ctx context.Context, volumeID, path, st
 		return volumeprobe.Result{}, err
 	}
 	entry := lookup.entry
-	snapshot, err := s.healthSnapshot(volumeID, entry, expectedNQN)
+	snapshot, err := s.healthSnapshot(volumeID, lookup, expectedNQN)
 	if err != nil {
 		return volumeprobe.Result{}, nvmeLifecycleError(ctx, "cannot establish NVMe health identity", err)
 	}
 	request := volumeprobe.Request{Path: path, MountID: entry.MountID, Device: entry.Device, Filesystem: entry.FSType, CheckSCSI: snapshot.source == "" && strings.HasPrefix(entry.Source, "/dev/")}
 	metadataStage := stagingPath
-	if metadataStage == "" && (snapshot.source != "" || lookup.raw) {
+	if metadataStage == "" && (snapshot.source != "" || lookup.rawDevice != "") {
 		metadataStage = path
 	}
 	if metadataStage != "" {
@@ -76,9 +76,9 @@ func (s *NodeService) probeMountedVolume(ctx context.Context, volumeID, path, st
 }
 
 type healthMountLookup struct {
-	path  string
-	entry mount.Entry
-	raw   bool
+	path      string
+	rawDevice string
+	entry     mount.Entry
 }
 
 func (s *NodeService) lookupHealthMount(ctx context.Context, volumeID, path string) (healthMountLookup, error) {
@@ -87,14 +87,16 @@ func (s *NodeService) lookupHealthMount(ctx context.Context, volumeID, path stri
 	if err != nil {
 		return lookup, nvmeLifecycleError(ctx, "cannot read health mount identity", err)
 	}
-	if !mounted {
+	// Raw bind mounts expose their containing device filesystem in mountinfo.
+	// Resolve the device number inside the helper before taking an NVMe snapshot.
+	if !mounted || entry.FSType == "devtmpfs" || entry.FSType == "tmpfs" {
 		resolved, resolveErr := s.resolveHealthMount(ctx, volumeID, path)
 		if resolveErr != nil {
 			return lookup, resolveErr
 		}
-		lookup.path, lookup.raw = resolved.Path, resolved.Raw
+		lookup.path, lookup.rawDevice = resolved.Mount.Path, resolved.RawDevice
 		entry, mounted, err = s.healthMount(ctx, lookup.path)
-		if err != nil || !mounted || !sameResolvedMount(entry, resolved) {
+		if err != nil || !mounted || !sameResolvedMount(entry, resolved.Mount) {
 			return lookup, status.Error(codes.Unavailable, "resolved mount identity changed")
 		}
 	}
@@ -109,33 +111,36 @@ func sameResolvedMount(entry mount.Entry, resolved *volumeprobe.ResolvedMount) b
 	return entry.MountID == resolved.MountID && entry.Source == resolved.Source && entry.Device == resolved.Device && entry.FSType == resolved.Filesystem
 }
 
-func (s *NodeService) resolveHealthMount(ctx context.Context, volumeID, path string) (*volumeprobe.ResolvedMount, error) {
+func (s *NodeService) resolveHealthMount(ctx context.Context, volumeID, path string) (volumeprobe.Result, error) {
 	result, err := s.runHealthProbe(ctx, volumeID, volumeprobe.Request{Path: path, ResolveMount: true})
 	if ctx.Err() != nil {
-		return nil, status.FromContextError(ctx.Err()).Err()
+		return volumeprobe.Result{}, status.FromContextError(ctx.Err()).Err()
 	}
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "mount path resolution could not complete: %v", err)
+		return volumeprobe.Result{}, status.Errorf(codes.Unavailable, "mount path resolution could not complete: %v", err)
 	}
 	if result.Code == volumeprobe.Missing {
-		return nil, status.Error(codes.NotFound, "volume path is missing or not mounted")
+		return volumeprobe.Result{}, status.Error(codes.NotFound, "volume path is missing or not mounted")
 	}
-	if result.Code != volumeprobe.OK || result.Mount == nil || !filepath.IsAbs(result.Mount.Path) {
-		return nil, status.Error(codes.Unavailable, "mount path could not be resolved")
+	if result.Code != volumeprobe.OK || result.Mount == nil || !filepath.IsAbs(result.Mount.Path) ||
+		result.Mount.Raw != (result.RawDevice != "") || (result.RawDevice != "" && !validNVMeDeviceNumber(result.RawDevice)) {
+
+		return volumeprobe.Result{}, status.Error(codes.Unavailable, "mount path could not be resolved")
 	}
-	return result.Mount, nil
+	return result, nil
 }
 
 type healthMountSnapshot struct {
-	record   *nvmeNodePolicyRecord
-	source   string
-	nqn      string
-	identity nvmeNamespaceIdentity
-	entry    mount.Entry
+	record    *nvmeNodePolicyRecord
+	source    string
+	nqn       string
+	rawDevice string
+	identity  nvmeNamespaceIdentity
+	entry     mount.Entry
 }
 
-func (s *NodeService) healthSnapshot(volumeID string, entry mount.Entry, expectedNQN string) (healthMountSnapshot, error) {
-	snapshot := healthMountSnapshot{entry: entry, nqn: expectedNQN}
+func (s *NodeService) healthSnapshot(volumeID string, lookup healthMountLookup, expectedNQN string) (healthMountSnapshot, error) {
+	snapshot := healthMountSnapshot{entry: lookup.entry, nqn: expectedNQN, rawDevice: lookup.rawDevice}
 	record, err := s.readNVMeNodeRecord(volumeID, "")
 	if err != nil && !errors.Is(err, errNVMePolicyRecordNotFound) {
 		return snapshot, status.Error(codes.FailedPrecondition, "retained NVMe identity is unreadable")
@@ -147,11 +152,17 @@ func (s *NodeService) healthSnapshot(volumeID string, entry mount.Entry, expecte
 		snapshot.nqn = record.Target.NQN
 	}
 	snapshot.record = record
-	snapshot.source, err = healthNVMeSource(entry.Source)
+	number := lookup.entry.Device
+	if lookup.rawDevice != "" {
+		number = lookup.rawDevice
+		snapshot.source, err = nvmeDeviceForHealthNumber(number)
+	} else {
+		snapshot.source, err = healthNVMeSource(lookup.entry.Source)
+	}
 	if err != nil {
 		return snapshot, err
 	}
-	snapshot.identity, err = s.healthNVMeIdentity(snapshot.source, entry.Device, snapshot.nqn, record)
+	snapshot.identity, err = s.healthNVMeIdentity(snapshot.source, number, snapshot.nqn, record)
 	return snapshot, err
 }
 
@@ -167,14 +178,11 @@ func (s *NodeService) completeHealthObservation(ctx context.Context, volumeID, p
 	if result.PolicyRecord != "" && (record == nil || result.PolicyRecord != nvmeRecordName(volumeID)) {
 		return status.Error(codes.FailedPrecondition, "staging policy cannot be bound to its durable record")
 	}
-	source, number, nqn := snapshot.source, snapshot.entry.Device, snapshot.nqn
-	if result.RawDevice != "" {
-		source, err = nvmeDeviceForHealthNumber(result.RawDevice)
-		if err != nil {
-			return nvmeLifecycleError(ctx, "cannot identify raw health source", err)
-		}
-		number = result.RawDevice
+	source, number, err := healthObservationSource(ctx, snapshot, result)
+	if err != nil {
+		return err
 	}
+	nqn := snapshot.nqn
 	if result.StagingNQN != "" {
 		if nqn != "" && nqn != result.StagingNQN {
 			return status.Error(codes.FailedPrecondition, "staging NQN conflicts with retained volume identity")
@@ -192,6 +200,24 @@ func (s *NodeService) completeHealthObservation(ctx context.Context, volumeID, p
 		return status.Error(codes.Unavailable, "NVMe health needs retained volume identity and a matching source")
 	}
 	return nil
+}
+
+func healthObservationSource(ctx context.Context, snapshot healthMountSnapshot, result volumeprobe.Result) (source, deviceNumber string, err error) {
+	// Failed probes may omit the device number; successful ones must retain its type.
+	if result.RawDevice != snapshot.rawDevice && (result.RawDevice != "" || result.Code == volumeprobe.OK) {
+		return "", "", status.Error(codes.Unavailable, "raw device identity changed during filesystem observation")
+	}
+	if snapshot.rawDevice == "" {
+		return snapshot.source, snapshot.entry.Device, nil
+	}
+	source, err = nvmeDeviceForHealthNumber(snapshot.rawDevice)
+	if err != nil {
+		return "", "", nvmeLifecycleError(ctx, "cannot identify raw health source", err)
+	}
+	if source != snapshot.source {
+		return "", "", status.Error(codes.Unavailable, "raw device source changed during filesystem observation")
+	}
+	return source, snapshot.rawDevice, nil
 }
 
 func healthNVMeSource(source string) (string, error) {
@@ -224,6 +250,9 @@ func nvmeDeviceForHealthNumber(number string) (string, error) {
 	}
 	name := filepath.Base(device)
 	if !nvmeNamespaceName.MatchString(name) {
+		if strings.HasPrefix(name, "nvme") {
+			return "", ErrNVMeIdentityConflict
+		}
 		return "", nil
 	}
 	return "/dev/" + name, nil
