@@ -23,13 +23,13 @@ type Finding struct {
 
 // ProcessReceipt must be supplied by a caller that observed process termination.
 type ProcessReceipt struct {
-	ExitCode       *int
-	Signal         string
-	TimedOut       bool
-	Canceled       bool
-	ChildrenExited bool
-	StdoutComplete bool
-	StderrComplete bool
+	ExitCode       *int   `json:"exit_code"`
+	Signal         string `json:"signal"`
+	TimedOut       bool   `json:"timed_out"`
+	Canceled       bool   `json:"canceled"`
+	ChildrenExited bool   `json:"children_exited"`
+	StdoutComplete bool   `json:"stdout_complete"`
+	StderrComplete bool   `json:"stderr_complete"`
 }
 
 // Evaluation retains per-job metrics even when a later job or process failed.

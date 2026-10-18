@@ -1,9 +1,10 @@
 # Offline performance evidence
 
-This package validates a finite file-test request and evaluates captured fio
-output. It does not connect to Kubernetes/TrueNAS, run fio, inspect a mount,
-change settings, or delete data. Its tests use synthetic public fixtures and
-fake process receipts. No production driver behavior changes are included.
+This package validates a finite file-test request, evaluates captured fio output
+and preserves supplied captures in an explicit evidence directory. It does not
+connect to Kubernetes/TrueNAS, run fio, inspect a mount, change settings or delete
+data. Tests use synthetic fixtures, fake process receipts and temporary local
+directories. No production driver behavior changes are included.
 
 ## Request and evaluation
 
@@ -60,6 +61,46 @@ writer exclusion or cleanup. Missing durable witness or runtime facts cannot
 be replaced by these parser tests. Any required metric acceptance policy belongs
 to the eventual scenario evaluator; optional missing metrics do not become zero.
 
+## Capture retention
+
+`NewEvidenceStore` takes a validated manifest and a caller-selected `*os.Root`
+directory handle. The directory's group/other permission bits must be zero;
+the caller must establish its ownership, filesystem security and separation
+from the measured/faulted storage. The store duplicates the handle and pins
+the manifest, so a later directory rename or caller-side job-plan change cannot
+redirect a capture. It does not open a path from a manifest or create a default
+output location.
+
+An exclusive `<run_id>.manifest.json` reserves the run. Existing manifests,
+orphaned capture files and indexes refuse reuse. `RecordCapture` accepts already
+captured stdout/stderr plus a process receipt; it never launches a process. It
+creates only these single-component names:
+
+- `<run_id>.stdout.raw` and `.stderr.raw`, unchanged even when evaluation fails.
+- `<run_id>.process.json`, with typed process state and allowlisted signal names.
+- `<run_id>.result.json`, with evaluation and receipts for completed artifacts.
+
+Each file uses exclusive creation and private permissions, followed by full-write,
+file-sync, close and directory-sync checks. Existing files and final symlinks
+are not followed or replaced. Returned receipts contain byte lengths and SHA-256
+hashes. The result index receipt is returned separately, avoiding a self hash.
+A file merely existing is not a completion receipt.
+
+Inspect both `CaptureResult.Evaluation.Status` and the returned error: a failed
+fio evaluation can have fully preserved evidence and a nil persistence error.
+Any persistence/finalization failure forces the returned evaluation to FAIL.
+Failure on one stream still attempts retention of the other stream, process
+receipt and failing index. A capture is attempted once, including when it fails;
+there is no retry, overwrite or deletion path. `Close` releases descriptors only.
+
+Raw streams must come from a reviewed credential-free fio invocation. This API
+is not a sanitizer for API responses or arbitrary command logs. It does not
+observe process exits, supervise descendants, enforce a write timeout, discover
+storage topology or prove crash durability. Those remain separate runner/lab
+contracts. Tests cover concurrent reservation/recording, file/symlink collisions,
+directory renames, failed output retention and injected short-write/sync/close
+failures on scratch evidence files only.
+
 ## Reviewed fio format and fixture provenance
 
 The initial format is exactly `fio-3.39`, reviewed against upstream
@@ -87,12 +128,13 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Planning IDs | Implemented offline scope | Remaining live/tooling prerequisite |
 | --- | --- | --- |
 | Q01, part of Q03/Q06 | Expected/observed immutable tuple comparison and required fields | Independent collectors, source scope/freshness, device generation and actual mount checks |
-| Part of Q02 | Component-boundary and lexical path rejection | Symlink-safe creation and check/use race handling |
+| Part of Q02 | Component-boundary/lexical path rejection; evidence writes pinned to a private directory handle with exclusive file creation | Workload path symlink handling and mount check/use races |
 | Q08 | Per-file totals/headroom, buffer lower bound, overflow and alignment | Actual PVC/pool capacity and memory/overhead observations |
 | Q09/Q10/Q11 | Every job/error, document completeness, optional metrics and integer preservation | Real sanitized success/error captures and required-metric scenario policy |
 | Part of Q12/Q13 | Per-job counts, distinct file plans and reported options | Independent exact-extent/checksum verification across processes |
-| Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings | Capability probes, real process tracking/cancellation and credential-safe adapters/artifact storage |
-| Q04/Q05/Q07/Q14/Q17/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, actual corruption detection, artifact lifecycle, XFS tools and raw-block regression |
+| Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
+| Part of Q17 | Exclusive run reservation and capture writes; no overwrite or automatic retry/cleanup | Audited exact-resource cleanup and crash reconciliation |
+| Q04/Q05/Q07/Q14/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, actual corruption detection, XFS tools and raw-block regression |
 
 All B/I/L/F/H/A/U/C target scenarios, actual scratch-file corruption, runtime
 images, durability witness, fault injection and benchmarks are **NOT RUN**.
@@ -138,3 +180,10 @@ tool. Only selected source/configuration files were streamed into its disposable
 filesystem. It had no host storage mounts, target devices or target credentials.
 No runtime image was built. A coverage comparison against a selected upstream
 main build and all target/lab qualification remain NOT RUN.
+
+The subsequent capture-retention slice passed the same focused shuffled race
+tests on darwin/arm64 and linux/arm64, with overall helper coverage 93.1%, clean
+focused lint, `make check` (including 80 sanity cases), the nolint budget and
+diff checks. Production source/dependencies and the coverage policy did not
+change; the production coverage gate was not repeated for capture retention.
+These results do not constitute scratch workload or target qualification.
