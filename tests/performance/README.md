@@ -8,6 +8,8 @@ Finalized witness records can be compared with recovery and delivered replies.
 The witness store records commits and seals a generation for finalization.
 The append-file writer orders target syncs before witness submission, and the
 recovery reader verifies actual headers and payloads against that final ledger.
+Target creation and recovery opens can use an explicitly supplied private
+directory handle, with exclusive creation and no-follow read-only recovery.
 It does not connect to Kubernetes/TrueNAS, run fio, inspect a mount, change
 settings or delete data. Tests use synthetic fixtures, fake process receipts and
 temporary local directories. No production driver behavior changes are included.
@@ -286,10 +288,43 @@ the supervising workload must retain those as failures. Context checks occur
 between calls and cannot interrupt blocked I/O or witness submission.
 
 Scratch controls exercise this sequence with real temporary files and the local
-witness store. Safe handle opening, immutable source identity, exclusion,
-independent witness transport/storage, process supervision and crash/fault
+witness store. Workload root selection/opening, immutable source identity,
+exclusion, independent witness transport/storage, process supervision and crash/fault
 qualification remain integration obligations. No runtime admission or fault
 controller is included.
+
+## Anchored witness target handles
+
+`CreateWitnessTarget(root, plan)` creates `<run_id>.witness-data.bin` with
+exclusive creation, write-only access and mode 0600 inside an already selected
+private `*os.Root`. It returns the target and an independently owned handle to
+that same directory for `NewWitnessFileWriter`. The filename derives from the
+validated run ID; no caller path or generation can redirect it or resume an
+existing file. Existing files, directories, FIFOs and symlinks are refused.
+Creation does not sync the empty file; the writer performs the required target
+and initial directory syncs before witness submission. Failures retain created
+files without cleanup, truncation or retry.
+
+`OpenWitnessSource(root, plan)` opens the same name read-only through the pinned
+directory, using native no-follow/nonblocking open before regular-file checks.
+It rejects symlinks, nonregular files, group/other permissions and files larger
+than the finite capacity. It reads no payloads and authenticates no content;
+pass the handle to `VerifyWitnessFile` with the independently trusted ledger.
+An empty or truncated file may open but cannot satisfy required recovery reads.
+
+Both functions validate the plan before directory access, require a private
+directory, and support the reviewed Linux/Darwin path only. Renaming the
+directory or replacing its old pathname cannot redirect either open. The
+caller owns all returned handles; closing the supplied root does not close them.
+Close the writer before closing its target/parent, and close each returned file
+after use. Internal close/open failures expose only sanitized errors.
+
+The caller still selects and opens the correct workload root, establishes its
+immutable storage identity and ownership, prevents concurrent replacement or
+modification, and separates witness storage from the fault domain. A private
+directory, pinned handle or exclusive file creation cannot establish those
+facts or admit a live workload. Formats and existing borrowed-handle APIs are
+unchanged; no automatic source discovery, resume or cleanup is included.
 
 ## Capture retention
 
@@ -402,13 +437,13 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Planning IDs | Implemented offline scope | Remaining live/tooling prerequisite |
 | --- | --- | --- |
 | Q01, part of Q03/Q06 | Expected/observed immutable tuple comparison and required fields | Independent collectors, source scope/freshness, device generation and actual mount checks |
-| Part of Q02 | Component-boundary/lexical path rejection; evidence writes pinned to a private directory handle with exclusive file creation | Workload path symlink handling and mount check/use races |
+| Part of Q02 | Component-boundary/lexical rejection; evidence/target creation pinned to private handles; exclusive target creation and no-follow recovery despite directory renames | Workload root selection, identity and mount check/use races |
 | Q08 | Per-file totals/headroom, buffer lower bound, overflow and alignment | Actual PVC/pool capacity and memory/overhead observations |
 | Q09/Q10/Q11 | Every job/error, document completeness, optional metrics, explicit-null percentile rejection and integer preservation | Real sanitized success/error captures and required-metric scenario policy |
 | Part of Q12/Q13/Q14 | Per-job counts, distinct plans/options, finite SHA-256 extent checks and independently receipted checksum plans; scratch corruption/short-read controls | Independent reader/source identity, trusted receipt custody, write/read process ordering and lab integration |
 | Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
 | Part of Q17 | Exclusive run reservation/capture writes and independent receipt-based read-back; no overwrite or automatic retry/cleanup | Trusted receipt retention, audited exact-resource cleanup and crash reconciliation |
-| Part of fault-durability evidence | Target write/sync ordering, checked witness commit/finalization, actual header/payload recovery, lost-reply reconciliation and separate unwitnessed-tail accounting | Safe handle opening, independent source/storage identity, witness transport, process supervision, ownership/fault admission and live durability qualification |
+| Part of fault-durability evidence | Anchored target handles, write/sync ordering, checked witness commit/finalization, actual header/payload recovery, lost-reply reconciliation and separate unwitnessed-tail accounting | Workload root selection, independent source/storage identity, witness transport, process supervision, ownership/fault admission and live durability qualification |
 | Q04/Q05/Q07/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, XFS tools and raw-block regression |
 
 All B/I/L/F/H/A/U/C target scenarios, runtime images, live durability witness,
@@ -525,3 +560,14 @@ unwitnessed suffixes. No dedicated fuzz test/session was added/run. Production
 code, dependencies and coverage policy are unchanged; production coverage was
 not repeated locally. No network witness service, live workload or storage fault
 was run; scratch syscall ordering does not establish crash durability.
+
+The anchored-target slice passed Go 1.26.2 focused Darwin/Linux shuffled race
+tests, complete `make check` (80/80 required CSI sanity cases), repository lint,
+the unchanged nolint budget (283 pairs) and diff checks. Controls exercise
+exclusive creation, existing-byte retention, symlink/FIFO refusal, private/size
+bounds, concurrent creation, generation reuse and real write/recovery after root
+close and directory pathname replacement. The unsupported-platform path compiled
+for Windows/amd64; Windows tests were not executed. No dedicated fuzz target or
+session was added/run. Production code, dependencies and coverage policy remain
+unchanged; production coverage was not repeated locally. No live storage
+workload or fault was run.
