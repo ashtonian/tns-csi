@@ -208,6 +208,7 @@ func TestHealthUsesDurableBindingAndRechecksItsEndpoint(t *testing.T) {
 func TestRawBlockStatsOmitFilesystemUsage(t *testing.T) {
 	s, path := xfsHealthFixture(t)
 	writeNVMeFixtureValue(t, filepath.Join(sysBlockPath, "nvme4n1", "dev"), "259:1")
+	fakeHealthDeviceIndex(t, map[string]string{"259:0": filepath.Join(sysBlockPath, "nvme0n1")})
 	s.healthMountFn = func(context.Context, string) (mount.Entry, bool, error) {
 		return mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}, true, nil
 	}
@@ -322,5 +323,64 @@ func TestNonNVMeHealthSourceDoesNotReadUnrelatedNamespaces(t *testing.T) {
 	source, err := healthNVMeSource("/dev/null")
 	if err != nil || source != "" {
 		t.Fatalf("non-NVMe source depended on unrelated namespace metadata: %q %v", source, err)
+	}
+}
+
+func TestNonNVMeRawStatsDoNotReadUnrelatedNamespaces(t *testing.T) {
+	useFakeSysBlock(t, map[string]string{"nvme0": nqnA}, map[string]string{"nvme0n1": "nvme0"})
+	device := filepath.Join(t.TempDir(), "sda")
+	writeNVMeFixtureValue(t, filepath.Join(device, "dev"), "8:0")
+	fakeHealthDeviceIndex(t, map[string]string{"8:0": device})
+	service := NewNodeService("test", nil, false, nil, false, 1)
+	service.nvmePolicyDirectory = t.TempDir()
+	service.healthMountFn = func(context.Context, string) (mount.Entry, bool, error) {
+		return mount.Entry{Source: "devtmpfs", FSType: "devtmpfs", Device: "0:5", MountID: 42}, true, nil
+	}
+	service.healthProbeFn = func(context.Context, string, volumeprobe.Request) (volumeprobe.Result, error) {
+		return volumeprobe.Result{Code: volumeprobe.OK, RawDevice: "8:0", TotalBytes: 4096}, nil
+	}
+	response, err := service.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{VolumeId: "v", VolumePath: "/raw-volume"})
+	if err != nil || len(response.GetUsage()) != 1 || response.Usage[0].Total != 4096 {
+		t.Fatalf("non-NVMe raw stats depended on unrelated namespace metadata: %+v %v", response, err)
+	}
+}
+
+func TestRawHealthDeviceIndexRequiresMatchingIdentity(t *testing.T) {
+	for _, change := range []string{"missing-index", "missing-device-number", "wrong-device-number", "invalid-request"} {
+		t.Run(change, func(t *testing.T) {
+			device := filepath.Join(t.TempDir(), "nvme0n1")
+			fakeHealthDeviceIndex(t, map[string]string{"259:0": device})
+			writeNVMeFixtureValue(t, filepath.Join(device, "dev"), "259:0")
+			number := "259:0"
+			switch change {
+			case "missing-index":
+				if err := os.Remove(filepath.Join(sysDevBlockHealthPath, number)); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-device-number":
+				if err := os.Remove(filepath.Join(device, "dev")); err != nil {
+					t.Fatal(err)
+				}
+			case "wrong-device-number":
+				writeNVMeFixtureValue(t, filepath.Join(device, "dev"), "259:1")
+			case "invalid-request":
+				number = "../nvme0n1"
+			}
+			if source, err := nvmeDeviceForHealthNumber(number); err == nil || source != "" {
+				t.Fatalf("accepted %s: %q %v", change, source, err)
+			}
+		})
+	}
+}
+
+func fakeHealthDeviceIndex(t *testing.T, devices map[string]string) {
+	t.Helper()
+	original := sysDevBlockHealthPath
+	sysDevBlockHealthPath = t.TempDir()
+	t.Cleanup(func() { sysDevBlockHealthPath = original })
+	for number, path := range devices {
+		if err := os.Symlink(path, filepath.Join(sysDevBlockHealthPath, number)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

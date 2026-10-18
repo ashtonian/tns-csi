@@ -24,6 +24,36 @@ health RPC does not establish that any consumer calls it. The removed legacy
 `VolumeCondition` API is not restored by this change. See the
 [CSI 1.13 health contract](https://github.com/container-storage-interface/spec/blob/v1.13.0/spec.md#nodegetvolumehealth).
 
+## Consumer compatibility
+
+These are source-checked versions, not evidence about an installed cluster:
+
+| Consumer | Integration with this driver |
+| --- | --- |
+| [Kubelet 1.37.1](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/volume/csi/csi_client.go) | Calls `NodeGetVolumeHealth` and maps adverse entries to Pod volume-health conditions. |
+| [Kubelet 1.36.2](https://github.com/kubernetes/kubernetes/blob/v1.36.2/pkg/volume/csi/csi_client.go) | Reads legacy `VolumeCondition` through `NodeGetVolumeStats`; it does not consume this driver's new health RPC. |
+| [Liveness probe 2.14.0](https://github.com/kubernetes-csi/livenessprobe/blob/v2.14.0/cmd/livenessprobe/main.go) | Calls the driver's identity `Probe` RPC. A successful `/healthz` does not report volume liveness. |
+
+In Kubernetes 1.37.1, `CSIVolumeHealth` is
+[alpha and disabled by default](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/features/kube_features.go).
+The [kubelet health manager](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/kubelet/volumemanager/volume_manager.go)
+requires that gate. The API server also needs the gate to retain newly reported
+[Pod volume-health status](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/api/pod/util.go).
+Installing this chart does not configure either component's feature gates.
+
+The [1.37.1 health manager](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/kubelet/volumemanager/volumehealth/manager.go)
+leaves previous conditions unchanged when a health RPC fails. Monitor failed
+probes separately: an empty or unchanged cached condition list does not establish
+a fresh successful observation. Neither this status update nor `/healthz` requests
+application restarts.
+
+Before adoption, verify each node's kubelet version, the API-server version and
+effective feature gates, then observe this driver's health RPC and resulting Pod
+status in the disposable qualification environment. A chart render, advertised
+capability or client-only check does not establish that deployed reporting works.
+
+## Mount and statistics observations
+
 NVMe observations check the actual device number, namespace identity and a live
 controller through sysfs ownership, including native multipath. A retained node
 record or staging metadata binds that observation to the volume. Legacy volumes

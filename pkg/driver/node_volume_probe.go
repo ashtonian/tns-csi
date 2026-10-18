@@ -3,7 +3,6 @@ package driver
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -14,6 +13,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// Raw-device lookup must not depend on metadata for unrelated namespaces.
+var sysDevBlockHealthPath = "/sys/dev/block"
 
 func (s *NodeService) healthMount(ctx context.Context, path string) (mount.Entry, bool, error) {
 	if s.healthMountFn != nil {
@@ -209,27 +211,22 @@ func healthNVMeSource(source string) (string, error) {
 }
 
 func nvmeDeviceForHealthNumber(number string) (string, error) {
-	entries, err := os.ReadDir(sysBlockPath)
+	if !validNVMeDeviceNumber(number) {
+		return "", ErrNVMeIdentityConflict
+	}
+	device, err := filepath.EvalSymlinks(filepath.Join(sysDevBlockHealthPath, number))
 	if err != nil {
 		return "", err
 	}
-	matched := ""
-	for _, entry := range entries {
-		if !nvmeNamespaceName.MatchString(entry.Name()) {
-			continue
-		}
-		dev, readErr := readSysfsValue(filepath.Join(sysBlockPath, entry.Name(), "dev"))
-		if readErr != nil {
-			return "", readErr
-		}
-		if dev == number {
-			if matched != "" {
-				return "", ErrNVMeIdentityConflict
-			}
-			matched = "/dev/" + entry.Name()
-		}
+	actual, err := readSysfsValue(filepath.Join(device, "dev"))
+	if err != nil || actual != number {
+		return "", errors.Join(ErrNVMeIdentityConflict, err)
 	}
-	return matched, nil
+	name := filepath.Base(device)
+	if !nvmeNamespaceName.MatchString(name) {
+		return "", nil
+	}
+	return "/dev/" + name, nil
 }
 
 func (s *NodeService) healthNVMeIdentity(source, number, nqn string, record *nvmeNodePolicyRecord) (nvmeNamespaceIdentity, error) {
