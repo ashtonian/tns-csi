@@ -10,9 +10,9 @@
 # Paired U2 measurement on Linux/arm64, Go 1.26.2:
 # total 37.0% -> 38.4%; driver 50.1% -> 50.3%; tnsapi 44.6% -> 50.0%;
 # kubectl plugin 5.1% -> 8.0%; driver executable 7.5% -> 14.0%.
-# Changed-package floors use measured coverage minus one point, rounded down
-# to one decimal. Unrelated package floors are preserved. Linux mount coverage
-# requires Linux tests; the Darwin development implementation has separate files.
+# The checker accepts integer thresholds. Prior fractional floors are rounded
+# up to preserve their intended minimum; unrelated floors remain unchanged.
+# Linux mount coverage requires Linux tests; Darwin uses separate files.
 
 profile: coverage.out
 
@@ -26,9 +26,9 @@ threshold:
 override:
   # First match wins, so keep specific paths before general ones.
   - path: ^pkg/driver$
-    threshold: 49.2
+    threshold: 50
   - path: ^pkg/tnsapi$
-    threshold: 49.0
+    threshold: 49
   - path: ^pkg/retry$
     threshold: 92
   - path: ^pkg/metrics$
@@ -36,9 +36,9 @@ override:
   - path: ^pkg/mount$
     threshold: 57
   - path: ^cmd/kubectl-tns-csi$
-    threshold: 7.0
+    threshold: 7
   - path: ^cmd/tns-csi-driver$
-    threshold: 12.9
+    threshold: 13
   # 10.0% once its query tests landed.
   - path: ^pkg/dashboard$
     threshold: 9
