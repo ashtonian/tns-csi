@@ -263,6 +263,9 @@ func NewClient(url, apiKey string, skipTLSVerify bool, opts ...ClientOption) (*C
 		// Connect to WebSocket
 		if err := c.connect(); err != nil {
 			lastConnErr = err
+			if errors.Is(err, ErrTLSVerification) {
+				return nil, fmt.Errorf("failed to connect: %w", err)
+			}
 			if attempt == maxAttempts {
 				return nil, fmt.Errorf("failed to connect after %d attempts: %w", maxAttempts, err)
 			}

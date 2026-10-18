@@ -44,7 +44,9 @@ the driver reads environment credentials at process start.
 Use verified `wss://` with the correct hostname and a CA trusted by the client
 process/container. Existing `skipTLSVerify` behavior and defaults are preserved;
 the CSI chart defaults to verification, while the kubectl plugin retains its
-existing default. A TLS verification failure never selects a less secure mode.
+existing default. A TLS verification failure returns immediately without connection
+retries or selecting a less secure mode. Correct the hostname or trusted CA before
+trying again.
 
 The request uses only `login_options.user_info=false`, which is present in the
 reviewed [25.10 schema](https://github.com/truenas/middleware/blob/c832dd144f981faa8290c0d243b8dc78ce1925ce/src/middlewared/middlewared/api/v25_10_0/auth.py)

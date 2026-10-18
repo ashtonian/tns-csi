@@ -3,10 +3,15 @@ package tnsapi
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
@@ -75,6 +80,39 @@ func TestModernOnlyServerRequiresUsername(t *testing.T) {
 	}
 	if !errors.Is(err, ErrAuthenticationUsernameRequired) || calls.Load() != 1 {
 		t.Fatalf("legacy login: error=%v calls=%d; want rejection and one request", err, calls.Load())
+	}
+}
+
+func TestNewClientStopsOnTLSVerificationFailure(t *testing.T) {
+	for _, modern := range []bool{false, true} {
+		t.Run(fmt.Sprintf("modern=%t", modern), func(t *testing.T) {
+			var handshakes, requests atomic.Int32
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				requests.Add(1)
+			}))
+			server.Config.ErrorLog = log.New(io.Discard, "", 0)
+			server.TLS = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+					handshakes.Add(1)
+					return server.TLS, nil
+				},
+			}
+			server.StartTLS()
+			t.Cleanup(server.Close)
+			opts := []ClientOption{WithConnectRetryDelays(0, 0, 0)}
+			if modern {
+				opts = append(opts, WithUsername("fixture-user"))
+			}
+			client, err := NewClient("wss"+strings.TrimPrefix(server.URL, "https"), "fixture-key", false, opts...)
+			if client != nil {
+				t.Cleanup(func() { cleanupClient(client) })
+				t.Fatal("untrusted certificate returned an authenticated client")
+			}
+			if !errors.Is(err, ErrTLSVerification) || handshakes.Load() != 1 || requests.Load() != 0 {
+				t.Fatalf("TLS rejection: error=%v handshakes=%d requests=%d; want verification failure, one handshake and no requests", err, handshakes.Load(), requests.Load())
+			}
+		})
 	}
 }
 
