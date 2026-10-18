@@ -154,7 +154,7 @@ func (s *EvidenceStore) RecordCapture(capture CapturedProcess) (CaptureResult, e
 		result.Artifacts = append(result.Artifacts, receipt)
 	}
 	if failed {
-		result.Evaluation.reject("EVIDENCE_INCOMPLETE", nil)
+		result.Evaluation.reject(reasonEvidenceIncomplete, nil)
 	}
 	index, err := json.Marshal(result)
 	if err != nil {
@@ -263,6 +263,6 @@ func failedCapture() CaptureResult {
 
 func failedResult(result CaptureResult) CaptureResult {
 	result.SchemaVersion = EvidenceVersion
-	result.Evaluation.reject("EVIDENCE_INCOMPLETE", nil)
+	result.Evaluation.reject(reasonEvidenceIncomplete, nil)
 	return result
 }

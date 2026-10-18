@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	phaseRead = "read"
+
 	// SchemaVersion identifies the finite-file request format.
 	SchemaVersion = 1
 	// FioVersion is the output format reviewed against upstream stat.c.
@@ -107,7 +109,7 @@ func DecodeManifest(data []byte) (Manifest, error) {
 func (m Manifest) Validate() error {
 	if m.SchemaVersion != SchemaVersion || !identifier.MatchString(m.RunID) ||
 		!validScenario(m.ScenarioID) || m.FioVersion != FioVersion ||
-		!pinnedImage(m.RunnerImage) || (m.Phase != "read" && m.Phase != "write") {
+		!pinnedImage(m.RunnerImage) || (m.Phase != phaseRead && m.Phase != "write") {
 
 		return ErrInvalidManifest
 	}

@@ -2,6 +2,7 @@
 
 This package validates a finite file-test request, evaluates captured fio output,
 preserves supplied captures and verifies their read-back against a trusted receipt.
+It also checks finite extents against independently supplied SHA-256 digests.
 It does not
 connect to Kubernetes/TrueNAS, run fio, inspect a mount, change settings or delete
 data. Tests use synthetic fixtures, fake process receipts and temporary local
@@ -12,8 +13,8 @@ directories. No production driver behavior changes are included.
 `DecodeManifest` requires all fields shown in
 [`testdata/manifest.json`](testdata/manifest.json), with their exact case and
 types. Schema 1 currently covers separate finite read and write phases on XFS
-or ext4. Mixed/time-based profiles, raw devices and checksum verification need
-additional contracts before use.
+or ext4. Mixed/time-based profiles and raw devices need additional contracts
+before use. Finite checksum verification uses the separate helper below.
 
 Requests are limited to 1 MiB. Unknown, missing, null, duplicate and conflicting
 case variants of keys are rejected without echoing their values. File names are
@@ -64,6 +65,39 @@ not establish exact offset coverage, checksum correctness, flush durability,
 writer exclusion or cleanup. Missing durable witness or runtime facts cannot
 be replaced by these parser tests. Any required metric acceptance policy belongs
 to the eventual scenario evaluator; optional missing metrics do not become zero.
+
+## Finite checksum verification
+
+`VerifyChecksums(ctx, manifest, expected, sources)` verifies a finite read-phase
+manifest against `ExtentChecksum` records. Each record binds the complete job
+plan to a canonical SHA-256. Supply one caller-owned `io.ReaderAt` per filename.
+All plans, digests and reader bindings are validated and pinned before any read;
+missing/duplicate records, changed extents, unavailable readers and offsets
+outside ReaderAt's signed range reject the entire request without data I/O.
+
+Establish and retain the expected checksums independently before writing the
+test data, together with the corresponding manifest. Hashing the current file
+to manufacture its expected checksum cannot detect prior corruption. The caller
+owns source identity, read-only opening, flush/close ordering and the trusted
+association between the saved plan and readers. This helper opens/closes no
+files, discovers no mounts and admits no live workload.
+
+The verifier reads only each declared offset/length, using a shared buffer of
+at most 64 KiB, also capped by the request's buffer budget. Short reads, invalid
+reader counts and reader errors fail without retry. `ReadBytes` records actual
+coverage; per-job `VerifiedBytes` is set only when that entire extent's digest
+matches. Aggregate `VerifiedBytes` remains null unless every planned extent
+matches. A failing job preserves successful observations from other jobs.
+`EvaluateFio.VerifiedBytes` still always remains null; the two results make
+different assertions.
+
+Cancellation stops subsequent reads and leaves incomplete verification as FAIL.
+It cannot interrupt a blocked ReaderAt, prove kernel I/O stopped, establish
+writer exclusion or demonstrate crash durability. No write, repair or cleanup
+path exists. Tests write nonzero payloads to temporary regular files, check
+sync/close, then reopen read-only: a byte flipped inside an extent and a short
+file fail, while a changed prefix outside the declared extent does not count
+toward verification. These are scratch-file tooling checks, not NVMe/XFS results.
 
 ## Capture retention
 
@@ -179,13 +213,14 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Part of Q02 | Component-boundary/lexical path rejection; evidence writes pinned to a private directory handle with exclusive file creation | Workload path symlink handling and mount check/use races |
 | Q08 | Per-file totals/headroom, buffer lower bound, overflow and alignment | Actual PVC/pool capacity and memory/overhead observations |
 | Q09/Q10/Q11 | Every job/error, document completeness, optional metrics, explicit-null percentile rejection and integer preservation | Real sanitized success/error captures and required-metric scenario policy |
-| Part of Q12/Q13 | Per-job counts, distinct file plans and reported options | Independent exact-extent/checksum verification across processes |
+| Part of Q12/Q13/Q14 | Per-job counts, distinct plans/options and finite SHA-256 extent checks; scratch corruption/short-read controls | Trusted pre-write checksum retention, independent reader/source identity and process/lab integration |
 | Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
 | Part of Q17 | Exclusive run reservation/capture writes and independent receipt-based read-back; no overwrite or automatic retry/cleanup | Trusted receipt retention, audited exact-resource cleanup and crash reconciliation |
-| Q04/Q05/Q07/Q14/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, actual corruption detection, XFS tools and raw-block regression |
+| Q04/Q05/Q07/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, XFS tools and raw-block regression |
 
-All B/I/L/F/H/A/U/C target scenarios, actual scratch-file corruption, runtime
-images, durability witness, fault injection and benchmarks are **NOT RUN**.
+All B/I/L/F/H/A/U/C target scenarios, runtime images, durability witness,
+target fault injection and benchmarks are **NOT RUN**. Scratch checksum tests
+exercise regular temporary files only.
 The baseline contains no performance package, so there is no baseline parser
 test result. Healthy/error controls qualify the new tooling only; they do not
 demonstrate that a baseline production driver/kernel defect was fixed.
@@ -253,3 +288,11 @@ and linux/arm64 (92.7% helper coverage), focused/repository lint, `make check`
 targets passed separate five-second/two-worker runs. The four counter-alias
 regressions failed against `bb96f08` before the correction. No production code,
 dependency version or coverage policy changed.
+
+The finite-checksum slice passed the Go 1.26.2 focused race tests, complete
+`make check` on darwin/arm64 (including 80 sanity cases), Linux/arm64 shuffled
+race tests and the unchanged nolint budget (283 pairs). The cancellation-between-
+extents regression failed before its fix and passes afterward. Scratch-file
+controls detect one-byte corruption and short reads without modifying data.
+No dedicated fuzz target or session was added/run. Production code, dependencies
+and coverage policy are unchanged; production coverage was not repeated locally.

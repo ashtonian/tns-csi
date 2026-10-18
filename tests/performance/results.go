@@ -5,13 +5,16 @@ import (
 	"strconv"
 )
 
-// Status is the outcome of byte-accounting evaluation, not live qualification.
+// Status identifies an offline assertion outcome, not live qualification.
 type Status string
 
 const (
-	// Pass means required process and byte-accounting assertions succeeded.
+	reasonEvidenceIncomplete = "EVIDENCE_INCOMPLETE"
+	reasonProcessError       = "PROCESS_ERROR"
+
+	// Pass means the containing result's required assertions succeeded.
 	Pass Status = "PASS"
-	// Fail means process, output or byte-accounting evidence failed.
+	// Fail means a required assertion failed or its evidence was incomplete.
 	Fail Status = "FAIL"
 )
 
@@ -124,10 +127,10 @@ func (e *Evaluation) checkProcess(process ProcessReceipt) {
 		e.reject("PROCESS_UNDRAINED", nil)
 	}
 	if process.ExitCode == nil || !process.StdoutComplete || !process.StderrComplete {
-		e.reject("EVIDENCE_INCOMPLETE", nil)
+		e.reject(reasonEvidenceIncomplete, nil)
 	}
 	if process.TimedOut || process.Canceled || process.Signal != "" || (process.ExitCode != nil && *process.ExitCode != 0) {
-		e.reject("PROCESS_ERROR", nil)
+		e.reject(reasonProcessError, nil)
 	}
 }
 
@@ -147,10 +150,10 @@ func (e *Evaluation) checkJobs(manifest Manifest, jobs []fioJob) {
 		if job.Error == nil {
 			e.reject("OUTPUT_INVALID", &index)
 		} else if *job.Error != 0 {
-			e.reject("PROCESS_ERROR", &index)
+			e.reject(reasonProcessError, &index)
 		}
 		if (job.TotalError != nil && *job.TotalError != 0) || (job.FirstError != nil && *job.FirstError != 0) {
-			e.reject("PROCESS_ERROR", &index)
+			e.reject(reasonProcessError, &index)
 		}
 		if !optionsMatch(manifest.Phase, manifest.Jobs[index], job.Options) {
 			e.reject("OUTPUT_INVALID", &index)
@@ -221,14 +224,14 @@ func (e *Evaluation) checkDirections(phase string, plan JobPlan, job fioJob, ind
 	for _, direction := range []struct {
 		stats *IOStats
 		name  string
-	}{{stats: job.Read, name: "read"}, {stats: job.Write, name: "write"}, {stats: job.Trim, name: "trim"}} {
+	}{{stats: job.Read, name: phaseRead}, {stats: job.Write, name: "write"}, {stats: job.Trim, name: "trim"}} {
 		stats := direction.stats
 		if stats == nil || stats.Bytes == nil || stats.TotalIOs == nil || stats.ShortIOs == nil || stats.DroppedIOs == nil {
 			e.reject("OUTPUT_INVALID", &index)
 			continue
 		}
 		if *stats.ShortIOs != 0 || *stats.DroppedIOs != 0 {
-			e.reject("PROCESS_ERROR", &index)
+			e.reject(reasonProcessError, &index)
 		}
 		wantBytes, wantIOs := uint64(0), uint64(0)
 		if direction.name == phase {
