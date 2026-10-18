@@ -87,14 +87,27 @@ func (r *IntegrityResult) reject(code string, index *int) {
 }
 
 func checksumInputs(manifest Manifest, expected []ExtentChecksum, sources map[string]io.ReaderAt) ([]checksumSource, bool) {
-	if manifest.Validate() != nil || manifest.Phase != phaseRead ||
-		len(expected) != len(manifest.Jobs) || len(sources) != len(manifest.Jobs) {
+	wanted, valid := checksumDigests(manifest, expected)
+	if !valid || len(sources) != len(manifest.Jobs) {
+		return nil, false
+	}
+	inputs := make([]checksumSource, 0, len(manifest.Jobs))
+	for _, plan := range manifest.Jobs {
+		if sources[plan.Filename] == nil {
+			return nil, false
+		}
+		inputs = append(inputs, checksumSource{plan: plan, expected: wanted[plan.Name], reader: sources[plan.Filename]})
+	}
+	return inputs, true
+}
 
+func checksumDigests(manifest Manifest, expected []ExtentChecksum) (map[string][]byte, bool) {
+	if manifest.Validate() != nil || manifest.Phase != phaseRead || len(expected) != len(manifest.Jobs) {
 		return nil, false
 	}
 	plans := make(map[string]JobPlan, len(manifest.Jobs))
 	for _, plan := range manifest.Jobs {
-		if plan.SizeBytes > math.MaxInt64 || plan.OffsetBytes > math.MaxInt64-plan.SizeBytes || sources[plan.Filename] == nil {
+		if plan.SizeBytes > math.MaxInt64 || plan.OffsetBytes > math.MaxInt64-plan.SizeBytes {
 			return nil, false
 		}
 		plans[plan.Name] = plan
@@ -111,11 +124,7 @@ func checksumInputs(manifest Manifest, expected []ExtentChecksum, sources map[st
 		}
 		wanted[plan.Name] = digest
 	}
-	inputs := make([]checksumSource, 0, len(manifest.Jobs))
-	for _, plan := range manifest.Jobs {
-		inputs = append(inputs, checksumSource{plan: plan, expected: wanted[plan.Name], reader: sources[plan.Filename]})
-	}
-	return inputs, true
+	return wanted, true
 }
 
 func verifyExtent(ctx context.Context, plan JobPlan, expected []byte, source io.ReaderAt, buffer []byte) (job IntegrityJob, code string) {

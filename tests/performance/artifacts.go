@@ -197,9 +197,12 @@ func (s *EvidenceStore) filename(kind string) string {
 }
 
 func (s *EvidenceStore) persist(kind string, data []byte) (ArtifactReceipt, error) {
-	name := s.filename(kind)
+	return persistArtifact(s.root, s.filename(kind), data)
+}
+
+func persistArtifact(root *os.Root, name string, data []byte) (ArtifactReceipt, error) {
 	// A single component plus O_EXCL refuses existing files and final symlinks.
-	file, err := s.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return ArtifactReceipt{}, ErrEvidenceExists
@@ -209,15 +212,15 @@ func (s *EvidenceStore) persist(kind string, data []byte) (ArtifactReceipt, erro
 	if err := writeSynced(file, data); err != nil {
 		return ArtifactReceipt{}, err
 	}
-	if err := s.syncDirectory(); err != nil {
+	if err := syncEvidenceDirectory(root); err != nil {
 		return ArtifactReceipt{}, err
 	}
 	hash := sha256.Sum256(data)
 	return ArtifactReceipt{Name: name, SHA256: hex.EncodeToString(hash[:]), Bytes: uint64(len(data))}, nil
 }
 
-func (s *EvidenceStore) syncDirectory() error {
-	dir, err := s.root.Open(".")
+func syncEvidenceDirectory(root *os.Root) error {
+	dir, err := root.Open(".")
 	if err != nil {
 		return ErrEvidenceIncomplete
 	}

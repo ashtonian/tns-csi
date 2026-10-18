@@ -3,10 +3,10 @@
 This package validates a finite file-test request, evaluates captured fio output,
 preserves supplied captures and verifies their read-back against a trusted receipt.
 It also checks finite extents against independently supplied SHA-256 digests.
-It does not
-connect to Kubernetes/TrueNAS, run fio, inspect a mount, change settings or delete
-data. Tests use synthetic fixtures, fake process receipts and temporary local
-directories. No production driver behavior changes are included.
+Checksum plans can be retained before writing data and checked before reuse.
+It does not connect to Kubernetes/TrueNAS, run fio, inspect a mount, change
+settings or delete data. Tests use synthetic fixtures, fake process receipts and
+temporary local directories. No production driver behavior changes are included.
 
 ## Request and evaluation
 
@@ -98,6 +98,39 @@ path exists. Tests write nonzero payloads to temporary regular files, check
 sync/close, then reopen read-only: a byte flipped inside an extent and a short
 file fail, while a changed prefix outside the declared extent does not count
 toward verification. These are scratch-file tooling checks, not NVMe/XFS results.
+
+## Retained checksum plans
+
+`SaveChecksumPlan(root, manifest, expected)` saves the intended **read-phase**
+manifest and its complete expected checksum records to
+`<run_id>.checksums.json`. Establish those digests independently, save the plan
+successfully before writing test data, and keep the returned `ArtifactReceipt`
+in a separate trusted location. A plan file's existence cannot prove that its
+digests were computed before corruption or that its save completed.
+
+The caller selects a private evidence directory outside the measured storage.
+Saving uses exclusive creation, private file permissions and checked full-write,
+file-sync, close and directory-sync completion. Existing files and symlinks
+refuse reuse; failed artifacts remain intact without overwrite, retry or cleanup.
+The caller's root remains open. This is an independent version-1 format, capped
+at 2 MiB for the manifest and at most 1024 bound digest records. It does not
+change capture-index version 2 or its four-artifact receipt format.
+
+`LoadChecksumPlan(root, receipt, manifest)` requires the separately trusted receipt
+and the full intended read manifest. It checks the private regular file through
+a descriptor-relative no-follow open, its exact size/hash, required record shape,
+format version, every bound extent/digest and exact manifest equality. Changed
+run/volume identities, budgets or job plans fail. Unsupported versions fail
+explicitly; any error returns no checksum records. No workload file is opened.
+Pass the successfully loaded records to `VerifyChecksums` with independently
+identified read-only sources. Loading performs no writes or data-path admission.
+
+Linux and Darwin support the reviewed no-follow read path; other platforms reject
+loading explicitly. Caller-owned directory security, source identity, writer
+exclusion and process ordering remain required. The scratch regression saves a
+plan before creating data files, reopens both and detects a changed data byte.
+Other controls cover malformed records, substituted manifests/receipts, concurrent
+savers, symlinks and retained evidence. These checks do not prove crash durability.
 
 ## Capture retention
 
@@ -213,7 +246,7 @@ exercise untrusted JSON without opening devices or spawning processes.
 | Part of Q02 | Component-boundary/lexical path rejection; evidence writes pinned to a private directory handle with exclusive file creation | Workload path symlink handling and mount check/use races |
 | Q08 | Per-file totals/headroom, buffer lower bound, overflow and alignment | Actual PVC/pool capacity and memory/overhead observations |
 | Q09/Q10/Q11 | Every job/error, document completeness, optional metrics, explicit-null percentile rejection and integer preservation | Real sanitized success/error captures and required-metric scenario policy |
-| Part of Q12/Q13/Q14 | Per-job counts, distinct plans/options and finite SHA-256 extent checks; scratch corruption/short-read controls | Trusted pre-write checksum retention, independent reader/source identity and process/lab integration |
+| Part of Q12/Q13/Q14 | Per-job counts, distinct plans/options, finite SHA-256 extent checks and independently receipted checksum plans; scratch corruption/short-read controls | Independent reader/source identity, trusted receipt custody, write/read process ordering and lab integration |
 | Part of Q15/Q16/Q18 | Version check, fake termination/stream evidence, sanitized findings/receipt signals, preservation on persistence failure | Capability probes, real process tracking/cancellation and credential-safe adapters |
 | Part of Q17 | Exclusive run reservation/capture writes and independent receipt-based read-back; no overwrite or automatic retry/cleanup | Trusted receipt retention, audited exact-resource cleanup and crash reconciliation |
 | Q04/Q05/Q07/Q19/Q20 | Not implemented in this slice | Visibility/multipath/caps, XFS tools and raw-block regression |
@@ -296,3 +329,11 @@ extents regression failed before its fix and passes afterward. Scratch-file
 controls detect one-byte corruption and short reads without modifying data.
 No dedicated fuzz target or session was added/run. Production code, dependencies
 and coverage policy are unchanged; production coverage was not repeated locally.
+
+The checksum-plan retention slice passed focused Darwin/Linux shuffled race
+tests, complete `make check` (80/80 CSI sanity cases), the unchanged nolint
+budget (283 pairs) and diff checks. Controls retain the plan before creating
+scratch data and detect corruption after reopening; altered plans, mismatched
+manifests, symlinks and concurrent saves are rejected. No dedicated fuzz test or
+session was added/run. Production code, dependencies and coverage policy are
+unchanged; production coverage was not repeated locally.
