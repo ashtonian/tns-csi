@@ -29,6 +29,7 @@ var (
 	driverName                = flag.String("driver-name", "tns.csi.io", "Name of the driver")
 	apiURL                    = flag.String("api-url", "", "Storage system API URL (e.g., ws://10.10.20.100/api/v2.0/websocket)")
 	apiKey                    = flag.String("api-key", "", "Storage system API key (prefer the "+truenasKeyEnvName+" environment variable: flag values are visible in the process list)")
+	apiUsername               = flag.String("api-username", "", "Optional API key owner username (or "+truenasUsernameEnvName+" environment variable); selects auth.login_ex")
 	metricsAddr               = flag.String("metrics-addr", "", "Address to expose Prometheus metrics")
 	skipTLSVerify             = flag.Bool("skip-tls-verify", false, "Skip TLS certificate verification (for self-signed certificates)")
 	showVersion               = flag.Bool("show-version", false, "Show version and exit")
@@ -46,6 +47,8 @@ var (
 // and /proc/<pid>/cmdline), which passing --api-key=$(TNS_API_KEY) does not.
 const truenasKeyEnvName = "TNS_API_KEY"
 
+const truenasUsernameEnvName = "TNS_USERNAME"
+
 // resolveAPIKey returns the API key from --api-key if set (backward compatibility),
 // otherwise from the environment, with surrounding whitespace from secrets trimmed.
 func resolveAPIKey(flagValue string, getenv func(string) string) string {
@@ -53,6 +56,13 @@ func resolveAPIKey(flagValue string, getenv func(string) string) string {
 		return v
 	}
 	return strings.TrimSpace(getenv(truenasKeyEnvName))
+}
+
+func resolveAPIUsername(flagValue string, getenv func(string) string) string {
+	if v := strings.TrimSpace(flagValue); v != "" {
+		return v
+	}
+	return strings.TrimSpace(getenv(truenasUsernameEnvName))
 }
 
 func main() {
@@ -102,6 +112,7 @@ func main() {
 		Endpoint:                  *endpoint,
 		APIURL:                    *apiURL,
 		APIKey:                    resolvedAPIKey,
+		APIUsername:               resolveAPIUsername(*apiUsername, os.Getenv),
 		MetricsAddr:               *metricsAddr,
 		SkipTLSVerify:             *skipTLSVerify,
 		EnableNVMeDiscovery:       *enableNVMeDiscovery,

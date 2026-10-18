@@ -31,12 +31,25 @@ const (
 type connectionConfig struct {
 	URL           string
 	APIKey        string
+	Username      string
 	SkipTLSVerify bool
 }
 
 // getConnectionConfig resolves TrueNAS connection config from various sources.
 // Priority: flags > explicit secret > auto-discovered secret > environment.
 func getConnectionConfig(ctx context.Context, url, apiKey, secretRef *string, skipTLSVerify *bool) (*connectionConfig, error) {
+	return resolveConnectionConfig(ctx, url, apiKey, secretRef, skipTLSVerify, connectionSources{
+		readSecret: getConfigFromSecret, discover: autoDiscoverDriverSecret, getenv: os.Getenv,
+	})
+}
+
+type connectionSources struct {
+	readSecret func(context.Context, string) (*connectionConfig, error)
+	discover   func(context.Context) *connectionConfig
+	getenv     func(string) string
+}
+
+func resolveConnectionConfig(ctx context.Context, url, apiKey, secretRef *string, skipTLSVerify *bool, sources connectionSources) (*connectionConfig, error) {
 	cfg := &connectionConfig{
 		SkipTLSVerify: true, // Default to skip for self-signed certs
 	}
@@ -55,15 +68,17 @@ func getConnectionConfig(ctx context.Context, url, apiKey, secretRef *string, sk
 
 	// If we have both from flags, we're done
 	if cfg.URL != "" && cfg.APIKey != "" {
+		cfg.Username = strings.TrimSpace(sources.getenv("TRUENAS_USERNAME"))
 		return cfg, nil
 	}
 
 	// Try explicitly provided Kubernetes secret
 	if secretRef != nil && *secretRef != "" {
-		secretCfg, err := getConfigFromSecret(ctx, *secretRef)
+		secretCfg, err := sources.readSecret(ctx, *secretRef)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read secret %s: %w", *secretRef, err)
 		}
+		cfg.Username = strings.TrimSpace(secretCfg.Username)
 		if cfg.URL == "" {
 			cfg.URL = secretCfg.URL
 		}
@@ -74,7 +89,10 @@ func getConnectionConfig(ctx context.Context, url, apiKey, secretRef *string, sk
 
 	// If still missing config, try auto-discovery from installed driver
 	if cfg.URL == "" || cfg.APIKey == "" {
-		if discoveredCfg := autoDiscoverDriverSecret(ctx); discoveredCfg != nil {
+		if discoveredCfg := sources.discover(ctx); discoveredCfg != nil {
+			if cfg.Username == "" {
+				cfg.Username = strings.TrimSpace(discoveredCfg.Username)
+			}
 			if cfg.URL == "" {
 				cfg.URL = discoveredCfg.URL
 			}
@@ -86,10 +104,14 @@ func getConnectionConfig(ctx context.Context, url, apiKey, secretRef *string, sk
 
 	// Try environment variables as fallback
 	if cfg.URL == "" {
-		cfg.URL = os.Getenv("TRUENAS_URL")
+		cfg.URL = sources.getenv("TRUENAS_URL")
 	}
 	if cfg.APIKey == "" {
-		cfg.APIKey = os.Getenv("TRUENAS_API_KEY")
+		cfg.APIKey = sources.getenv("TRUENAS_API_KEY")
+	}
+
+	if cfg.Username == "" {
+		cfg.Username = strings.TrimSpace(sources.getenv("TRUENAS_USERNAME"))
 	}
 
 	// Validate we have required config
@@ -133,7 +155,7 @@ func getConfigFromSecret(ctx context.Context, secretRef string) (*connectionConf
 		return nil, fmt.Errorf("failed to get secret: %w", err)
 	}
 
-	cfg := &connectionConfig{}
+	cfg := &connectionConfig{Username: strings.TrimSpace(string(secret.Data["username"]))}
 
 	// Try common key names for URL
 	for _, key := range []string{keyURL, flagTruenasURL, "TRUENAS_URL"} {
@@ -160,10 +182,10 @@ type TrueNASClient struct {
 }
 
 // connectToTrueNAS creates a TrueNAS API client with the given config.
-// The client auto-connects on first API call.
+// The client connects and authenticates before returning.
 func connectToTrueNAS(_ context.Context, cfg *connectionConfig) (*TrueNASClient, error) {
-	//nolint:contextcheck // NewClient doesn't require context, connection is lazy
-	client, err := tnsapi.NewClient(cfg.URL, cfg.APIKey, cfg.SkipTLSVerify)
+	//nolint:contextcheck // NewClient establishes its connection using internal timeouts.
+	client, err := tnsapi.NewClient(cfg.URL, cfg.APIKey, cfg.SkipTLSVerify, tnsapi.WithUsername(cfg.Username))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TrueNAS client: %w", err)
 	}
@@ -309,7 +331,7 @@ func discoverDriverNamespace(ctx context.Context) string {
 
 // extractConfigFromSecretData extracts connection config from secret data.
 func extractConfigFromSecretData(data map[string][]byte) *connectionConfig {
-	cfg := &connectionConfig{}
+	cfg := &connectionConfig{Username: strings.TrimSpace(string(data["username"]))}
 
 	// Try common key names for URL
 	for _, key := range []string{keyURL, flagTruenasURL, "TRUENAS_URL"} {

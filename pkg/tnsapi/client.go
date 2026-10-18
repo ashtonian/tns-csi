@@ -82,15 +82,18 @@ var (
 //
 //nolint:govet // fieldalignment: struct field order optimized for readability over memory layout
 type Client struct {
-	mu            sync.Mutex
-	closeOnce     sync.Once
-	conn          *websocket.Conn
-	pending       map[string]chan *Response
-	closeCh       chan struct{}
-	url           string
-	apiKey        string
-	connectedAt   time.Time // Track connection start time for metrics
-	retryInterval time.Duration
+	mu                sync.Mutex
+	closeOnce         sync.Once
+	conn              *websocket.Conn
+	pending           map[string]chan *Response
+	closeCh           chan struct{}
+	url               string
+	apiKey            string
+	username          string
+	terminalErr       error
+	connectedAt       time.Time // Track connection start time for metrics
+	retryInterval     time.Duration
+	reinitializeDelay time.Duration
 	// connectRetryDelays holds the wait before each NewClient connection attempt
 	// (one entry per attempt; the first is normally 0). Tests shorten it.
 	connectRetryDelays []time.Duration
@@ -174,30 +177,6 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("Storage API error %d: %s", e.Code, e.Message)
 }
 
-// isAuthenticationError checks if an error is a permanent authentication failure.
-// These include:
-// - 401 (unauthorized/invalid API key)
-// - Rejected API key errors
-// - 500 errors during authentication (likely indicates broken auth endpoint, not transient)
-// These should not be retried as they indicate configuration/server issues.
-func isAuthenticationError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Check for explicit authentication errors
-	if errors.Is(err, ErrAuthenticationRejected) {
-		return true
-	}
-
-	// Check error message for authentication-related failures
-	errMsg := err.Error()
-	return strings.Contains(errMsg, "401") ||
-		strings.Contains(errMsg, "invalid API key") ||
-		strings.Contains(errMsg, "rejected API key") ||
-		(strings.Contains(errMsg, "authentication failed") && strings.Contains(errMsg, "500"))
-}
-
 // DefaultReadLimit is the default maximum size, in bytes, of a single WebSocket message
 // (one JSON-RPC response) the client accepts from TrueNAS. Larger responses fail the read
 // and drop the connection.
@@ -249,6 +228,7 @@ func NewClient(url, apiKey string, skipTLSVerify bool, opts ...ClientOption) (*C
 			closeCh:            make(chan struct{}),
 			maxRetries:         5,
 			retryInterval:      5 * time.Second,
+			reinitializeDelay:  30 * time.Second,
 			connectRetryDelays: defaultConnectRetryDelays,
 			skipTLSVerify:      skipTLSVerify,
 			authGate:           make(chan struct{}, 1),
@@ -365,7 +345,7 @@ func (c *Client) connect() error {
 		defer resp.Body.Close()
 	}
 	if err != nil {
-		return fmt.Errorf("failed to dial: %w", err)
+		return fmt.Errorf("failed to dial: %w", sanitizeConnectionError(err))
 	}
 
 	// Read limit (DefaultReadLimit unless set via WithReadLimit) as a safety net for large
@@ -384,7 +364,7 @@ func (c *Client) connect() error {
 	if c.closed {
 		c.mu.Unlock()
 		if closeErr := conn.Close(websocket.StatusNormalClosure, "client closed while connecting"); closeErr != nil {
-			klog.V(5).Infof("Failed to close connection created during client shutdown: %v", closeErr)
+			klog.V(5).Infof("Failed to close connection created during client shutdown: class=%s", connectionErrorClass(closeErr))
 		}
 		return ErrClientClosed
 	}
@@ -408,25 +388,14 @@ func (c *Client) authenticate(ctx context.Context) error {
 }
 
 func (c *Client) authenticateLocked(ctx context.Context) error {
-	klog.V(4).Info("Authenticating with storage system using auth.login_with_api_key")
-
-	// Storage system uses JSON-RPC 2.0 for authentication
-	// Call auth.login_with_api_key with the API key
+	method, params := c.authenticationRequest()
 	authCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
-	var authResult bool
-	if err := c.Call(authCtx, methodAuthLoginWithAPIKey, []interface{}{c.apiKey}, &authResult); err != nil {
-		return fmt.Errorf("authentication failed: %w", err)
+	var result json.RawMessage
+	if err := c.Call(authCtx, method, params, &result); err != nil {
+		return fmt.Errorf("authentication failed: %w", sanitizeAuthenticationError(method, err))
 	}
-
-	if !authResult {
-		klog.Errorf("Storage system rejected API key (length: %d)", len(c.apiKey))
-		return ErrAuthenticationRejected
-	}
-
-	klog.V(4).Info("Successfully authenticated with storage system")
-	return nil
+	return validateAuthenticationResult(method, result)
 }
 
 // authenticateDirect performs API key authentication by directly reading from WebSocket
@@ -442,7 +411,7 @@ func (c *Client) authenticateDirect() error {
 }
 
 func (c *Client) authenticateDirectLocked(ctx context.Context) error {
-	klog.V(4).Info("Authenticating with storage system using auth.login_with_api_key (direct mode)")
+	method, params := c.authenticationRequest()
 
 	c.mu.Lock()
 
@@ -453,59 +422,35 @@ func (c *Client) authenticateDirectLocked(ctx context.Context) error {
 	req := &Request{
 		ID:      id,
 		JSONRPC: "2.0",
-		Method:  methodAuthLoginWithAPIKey,
-		Params:  []interface{}{c.apiKey},
+		Method:  method,
+		Params:  params,
 	}
 
 	// Send request (log method only, not params which contain sensitive data)
 	klog.V(5).Infof("Sending authentication request: method=%s, id=%s", req.Method, req.ID)
 	if err := wsjson.Write(ctx, c.conn, req); err != nil {
 		c.mu.Unlock()
-		return fmt.Errorf("failed to send authentication request: %w", err)
+		return fmt.Errorf("failed to send authentication request: %w", sanitizeConnectionError(err))
 	}
 	c.mu.Unlock()
 
 	// Read response directly (don't use readLoop)
 	_, rawMsg, err := c.conn.Read(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to read authentication response: %w", err)
+		return fmt.Errorf("failed to read authentication response: %w", sanitizeConnectionError(err))
 	}
 
-	klog.V(5).Infof("Received raw response: %s", string(rawMsg))
-
-	// Parse response
 	var resp Response
 	if err := json.Unmarshal(rawMsg, &resp); err != nil {
-		return fmt.Errorf("failed to unmarshal authentication response: %w", err)
+		return ErrAuthenticationMalformed
 	}
-
-	klog.V(5).Infof("Parsed response: %+v", resp)
-
-	// Check for errors
-	if resp.Error != nil {
-		return fmt.Errorf("authentication error: %w", resp.Error)
-	}
-
-	// Verify response ID matches
 	if resp.ID != id {
-		return fmt.Errorf("%w: expected %s, got %s", ErrResponseIDMismatch, id, resp.ID)
+		return ErrResponseIDMismatch
 	}
-
-	// Parse auth result
-	var authResult bool
-	if resp.Result != nil {
-		if err := json.Unmarshal(resp.Result, &authResult); err != nil {
-			return fmt.Errorf("failed to unmarshal authentication result: %w", err)
-		}
+	if resp.Error != nil {
+		return sanitizeAuthenticationError(method, resp.Error)
 	}
-
-	if !authResult {
-		klog.Errorf("Storage system rejected API key (length: %d)", len(c.apiKey))
-		return ErrAuthenticationRejected
-	}
-
-	klog.V(4).Info("Successfully authenticated with storage system (direct mode)")
-	return nil
+	return validateAuthenticationResult(method, resp.Result)
 }
 
 func (c *Client) acquireAuthentication(ctx context.Context) error {
@@ -567,6 +512,9 @@ func (c *Client) reauthenticate(ctx context.Context, requestEpoch uint64) error 
 		c.reauthMu.Unlock()
 
 		performedAuth, err := c.performReauthentication(ctx, requestEpoch)
+		if performedAuth && ctx.Err() == nil && isAuthenticationError(err) {
+			c.stopOnPermanentFailure(err)
+		}
 		c.finishReauthentication(ctx, reauthDone, err, performedAuth)
 		return err
 	}
@@ -703,7 +651,7 @@ func (c *Client) prepareCallRetry(
 
 	// A live connection can lose its server-side session authentication. The
 	// auth method is excluded here so a rejected auth request cannot recurse.
-	if method != methodAuthLoginWithAPIKey && isSessionAuthError(err) {
+	if !isAuthMethod(method) && isSessionAuthError(err) {
 		if attempt >= maxRetries {
 			return nil, false, nil
 		}
@@ -716,7 +664,7 @@ func (c *Client) prepareCallRetry(
 
 	// Connection initialization and live-session reauthentication coordinate
 	// auth retries themselves and need the connection loss immediately.
-	if method == methodAuthLoginWithAPIKey && isConnectionError(err) {
+	if isAuthMethod(method) && isConnectionError(err) {
 		return nil, false, err
 	}
 	// A request that may already have been applied is only repeated if that is harmless.
@@ -758,9 +706,10 @@ func (c *Client) waitForCallRetry(ctx context.Context, attempt, maxRetries int, 
 
 	c.mu.Lock()
 	closed := c.closed
+	closedErr := c.closedErrorLocked()
 	c.mu.Unlock()
 	if closed {
-		return ErrClientClosed
+		return closedErr
 	}
 	if attempt >= maxRetries {
 		return nil
@@ -775,7 +724,7 @@ func (c *Client) waitForCallRetry(ctx context.Context, attempt, maxRetries int, 
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.closeCh:
-		return ErrClientClosed
+		return c.closedError()
 	}
 }
 
@@ -784,15 +733,16 @@ func (c *Client) callOnce(ctx context.Context, method string, params []interface
 	for {
 		c.mu.Lock()
 		if c.closed {
+			err := c.closedErrorLocked()
 			c.mu.Unlock()
-			return 0, ErrClientClosed
+			return 0, err
 		}
 		reconnectDone := c.reconnectDone
 		if reconnectDone == nil {
 			break
 		}
 		c.mu.Unlock()
-		if method == methodAuthLoginWithAPIKey {
+		if isAuthMethod(method) {
 			return 0, ErrConnectionClosed
 		}
 
@@ -802,7 +752,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params []interface
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		case <-c.closeCh:
-			return 0, ErrClientClosed
+			return 0, c.closedError()
 		}
 	}
 
@@ -849,6 +799,9 @@ func (c *Client) callOnce(ctx context.Context, method string, params []interface
 		}
 		metrics.RecordWSMessage("received")
 		if resp.Error != nil {
+			if isAuthMethod(method) {
+				return requestEpoch, sanitizeAuthenticationError(method, resp.Error)
+			}
 			return requestEpoch, resp.Error
 		}
 		if result != nil && resp.Result != nil {
@@ -863,6 +816,12 @@ func (c *Client) callOnce(ctx context.Context, method string, params []interface
 		c.mu.Unlock()
 		return requestEpoch, ctx.Err()
 	case <-c.closeCh:
+		c.mu.Lock()
+		terminal := c.terminalErr != nil
+		c.mu.Unlock()
+		if terminal {
+			return requestEpoch, fmt.Errorf("%w: %w", ErrConnectionClosed, errResponseLost)
+		}
 		return requestEpoch, ErrClientClosed
 	}
 }
@@ -915,59 +874,95 @@ func (c *Client) handleReadError(err error) bool {
 	// coder/websocket uses CloseStatus to check close codes
 	closeStatus := websocket.CloseStatus(err)
 	if closeStatus != websocket.StatusNormalClosure && closeStatus != websocket.StatusGoingAway {
-		klog.Errorf("WebSocket read error: %v", err)
+		klog.Errorf("WebSocket read failed: class=%s status=%d", connectionErrorClass(err), closeStatus)
 	}
 	if !c.beginReconnect() {
 		return false
 	}
 	defer c.endReconnect()
 
-	// Attempt to reconnect
-	if c.reconnect() {
+	// Attempt to reconnect; permanent authentication failures must not reinitialize.
+	err = c.reconnect()
+	if err == nil {
 		klog.Info("Successfully reconnected to storage WebSocket")
 		return true
 	}
-
-	// Reconnection failed, attempt full reinitialization
+	if c.stopOnPermanentFailure(err) {
+		return false
+	}
 	return c.reinitializeConnection()
 }
 
 // reinitializeConnection performs full connection reinitialization after reconnect failures.
 func (c *Client) reinitializeConnection() bool {
-	klog.Warning("Failed to reconnect after 5 attempts, will reinitialize connection in 30 seconds...")
+	delay := c.reinitializeDelay
+	if delay <= 0 {
+		delay = 30 * time.Second
+	}
+	klog.Warningf("Failed to reconnect, will reinitialize connection in %v", delay)
 	select {
-	case <-time.After(30 * time.Second):
+	case <-time.After(delay):
 	case <-c.closeCh:
 		return false
 	}
-
-	klog.Info("Reinitializing WebSocket connection from scratch...")
 	if err := c.connectAndAuthenticateDirect(); err != nil {
-		if errors.Is(err, ErrClientClosed) {
+		if c.stopOnPermanentFailure(err) {
 			return false
 		}
-		klog.Errorf("Connection reinitialization failed: %v, will retry", err)
+		klog.Errorf("Connection reinitialization failed: class=%s", connectionErrorClass(err))
 		return true
 	}
-
 	klog.Info("Successfully reinitialized WebSocket connection")
 	return true
 }
 
+func (c *Client) stopOnPermanentFailure(err error) bool {
+	if errors.Is(err, ErrClientClosed) {
+		return true
+	}
+	if !isAuthenticationError(err) && !errors.Is(err, ErrTLSVerification) {
+		return false
+	}
+	c.mu.Lock()
+	c.terminalErr = err
+	c.closed = true
+	conn := c.conn
+	c.mu.Unlock()
+	metrics.SetWSConnectionStatus(false)
+	klog.Errorf("Storage connection stopped: %v", err)
+	if conn != nil {
+		if closeErr := conn.CloseNow(); closeErr != nil {
+			klog.V(5).Infof("Failed to close rejected connection: class=%s", connectionErrorClass(closeErr))
+		}
+	}
+	return true
+}
+
+// closedErrorLocked requires mu. Only sanitized terminal errors are retained.
+func (c *Client) closedErrorLocked() error {
+	if c.terminalErr != nil {
+		return c.terminalErr
+	}
+	return ErrClientClosed
+}
+
+func (c *Client) closedError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closedErrorLocked()
+}
+
 // processResponse unmarshals and dispatches a response to the waiting caller.
 func (c *Client) processResponse(rawMsg []byte) {
-	klog.V(5).Infof("Received raw response: %s", string(rawMsg))
-
 	var resp Response
 	if err := json.Unmarshal(rawMsg, &resp); err != nil {
-		klog.Errorf("Failed to unmarshal response: %v", err)
+		klog.Error("Failed to unmarshal WebSocket response")
 		return
 	}
 
-	klog.V(5).Infof("Parsed response: %+v", resp)
-
 	c.mu.Lock()
 	if ch, ok := c.pending[resp.ID]; ok {
+		klog.V(5).Infof("Received response: id=%s", resp.ID)
 		delete(c.pending, resp.ID)
 		ch <- &resp
 		close(ch)
@@ -976,7 +971,8 @@ func (c *Client) processResponse(rawMsg []byte) {
 }
 
 // reconnect attempts to reconnect to the WebSocket and re-authenticate.
-func (c *Client) reconnect() bool {
+func (c *Client) reconnect() error {
+	lastErr := ErrConnectionClosed
 	klog.Warning("WebSocket connection lost, attempting to reconnect...")
 
 	// Update metrics - connection lost
@@ -1002,36 +998,40 @@ func (c *Client) reconnect() bool {
 		case <-time.After(backoff):
 		case <-c.closeCh:
 			klog.Info("Reconnection canceled - client is closing")
-			return false
+			return ErrClientClosed
 		}
 
 		// Close old connection
 		c.mu.Lock()
-		if c.conn != nil {
-			// coder/websocket Close takes status code and reason
-			// Ignore close error during reconnection - connection may already be broken
-			//nolint:errcheck,gosec // G104: Intentionally ignoring close error during reconnection
-			c.conn.Close(websocket.StatusGoingAway, "reconnecting")
-		}
+		oldConn := c.conn
 		// Reset pending requests for new connection
 		for _, ch := range c.pending {
 			close(ch)
 		}
 		c.pending = make(map[string]chan *Response)
 		c.mu.Unlock()
+		if oldConn != nil {
+			if err := oldConn.Close(websocket.StatusGoingAway, "reconnecting"); err != nil {
+				klog.V(5).Infof("Failed to close old connection: class=%s", connectionErrorClass(err))
+			}
+		}
 
 		// Reconnect and authenticate while live re-authentication is excluded;
 		// readLoop is blocked here, so authentication must read directly.
 		if err := c.connectAndAuthenticateDirect(); err != nil {
-			klog.Errorf("Re-authentication attempt %d failed: %v", attempt, err)
+			lastErr = err
+			if isAuthenticationError(err) || errors.Is(err, ErrClientClosed) || errors.Is(err, ErrTLSVerification) {
+				return err
+			}
+			klog.Errorf("Re-authentication attempt %d failed: class=%s", attempt, connectionErrorClass(err))
 			continue
 		}
 
 		klog.Infof("Successfully reconnected on attempt %d", attempt)
-		return true
+		return nil
 	}
 
-	return false
+	return lastErr
 }
 
 func (c *Client) beginReconnect() bool {
@@ -1105,7 +1105,7 @@ func (c *Client) pingLoop() {
 			cancel()
 
 			if err != nil {
-				klog.Warningf("Failed to send ping: %v", err)
+				klog.Warningf("Failed to send ping: class=%s", connectionErrorClass(err))
 				continue
 			}
 

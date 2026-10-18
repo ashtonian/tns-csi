@@ -121,6 +121,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify isolated E2E authentication helpers
+        run: go test -short -race ./tests/e2e/framework
+
       - name: Read pinned golangci-lint version
         id: lintver
         # Single source of truth is GOLANGCI_LINT_VERSION in the Makefile.

@@ -1,11 +1,11 @@
 contextcheck 14
 dupl 27
-errcheck 62
+errcheck 61
 errchkjson 2
 gocognit 1
 gocritic 2
 gocyclo 2
-gosec 55
+gosec 54
 govet 60
 interfacebloat 1
 mnd 1

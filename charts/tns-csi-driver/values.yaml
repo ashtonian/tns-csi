@@ -8,16 +8,19 @@ truenas:
   # Format: wss://YOUR-TRUENAS-IP:PORT/api/current
   # Example: wss://truenas.example.com:443/api/current
   url: ""
-  
+
   # TrueNAS API key
   # You can generate this in TrueNAS UI: System > API Keys
   apiKey: ""
-  
+
+  # Optional API key owner username; selects auth.login_ex when nonempty.
+  username: ""
+
   # Name of existing secret containing TrueNAS credentials
-  # If set, url and apiKey above will be ignored
-  # Secret should contain keys: 'url' and 'api-key'
+  # If set, url, apiKey and username above will be ignored
+  # Secret should contain keys: 'url' and 'api-key', with optional 'username'
   existingSecret: ""
-  
+
   # Skip TLS certificate verification
   # Set to true if TrueNAS uses self-signed certificates
   # WARNING: Only enable this in trusted networks

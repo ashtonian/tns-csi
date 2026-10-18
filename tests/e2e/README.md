@@ -16,6 +16,8 @@ This directory contains end-to-end tests for the TrueNAS CSI driver using [Ginkg
 |----------|----------|---------|-------------|
 | `TRUENAS_HOST` | Yes | - | TrueNAS server hostname (e.g., `truenas.local`) |
 | `TRUENAS_API_KEY` | Yes | - | TrueNAS API key for authentication |
+| `TRUENAS_USERNAME` | No | empty | API key owner; enables modern auth in verifier and driver |
+| `TRUENAS_SKIP_TLS_VERIFY` | No | `true` | Explicit harness TLS mode; set `false` for hostname/CA verification |
 | `TRUENAS_POOL` | No | `csi` | ZFS pool to use for test volumes |
 | `CSI_IMAGE_REPO` | No | `ghcr.io/fenio/tns-csi` | Docker image repository |
 | `CSI_IMAGE_TAG` | No | `latest` | Docker image tag |
@@ -68,6 +70,8 @@ go test -v ./nfs/... -ginkgo.v
 ```bash
 go test -v ./nfs/... -ginkgo.junit-report=junit-nfs.xml
 ```
+
+The isolated `framework` unit tests use synthetic local servers and fake Helm; they do not start an E2E suite. Credentialed runs require a disposable lab. The deployment helper passes the key via a private temporary file, removes it when Helm exits and suppresses potentially secret-bearing deployment output on failure. In verified mode, both the driver container and verifier process must trust the server CA; `wss://` alone does not establish verification. Existing two-argument verifier callers retain the earlier insecure default.
 
 ## Directory Structure
 
@@ -204,7 +208,7 @@ To run manually:
 1. Check environment variables are set:
    ```bash
    echo $TRUENAS_HOST
-   echo $TRUENAS_API_KEY
+   test -n "$TRUENAS_API_KEY" && echo "API key is configured"
    ```
 
 2. Verify kubectl access:

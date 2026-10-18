@@ -49,6 +49,8 @@ The plugin automatically discovers TrueNAS credentials from the installed driver
 3. **Auto-discovery**: Searches the current context namespace, `tns-csi`, then the legacy `kube-system` namespace for driver secrets
 4. **Environment variables**: `TRUENAS_URL` and `TRUENAS_API_KEY`
 
+An optional Secret `username` key or `TRUENAS_USERNAME` selects modern authentication. With complete URL/key flags, only the username environment is read; no Secret lookup is added. Otherwise a consulted explicit Secret username precedes a consulted discovered Secret, then the environment. Blank usernames preserve legacy auth. See [authentication configuration](AUTHENTICATION.md) for TLS and rollback details.
+
 ### Examples
 
 ```bash

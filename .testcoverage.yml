@@ -7,28 +7,28 @@
 #   2. Diff vs main (CI only): a PR may not reduce total coverage relative to the
 #      latest main build, beyond a 0.5-point noise tolerance (COVERAGE_DIFF_THRESHOLD).
 #
-# Baseline measured 2026-10-10 in CI (ubuntu-latest) and locally; CI runs lower for
-# timing/environment-dependent paths, so floors follow the CI numbers:
-#   total ~32%, pkg/driver 44.3%, pkg/tnsapi 39.5%, pkg/retry 94.0%,
-#   pkg/metrics 71.4%, pkg/mount 58.7%, cmd/kubectl-tns-csi 2.3-2.6%,
-#   pkg/dashboard 0%, cmd/tns-csi-driver 0%.
-# Floors sit ~1-1.5 points below to absorb that noise.
+# Paired U2 measurement on Linux/arm64, Go 1.26.2:
+# total 37.0% -> 38.4%; driver 50.1% -> 50.3%; tnsapi 44.6% -> 50.0%;
+# kubectl plugin 5.1% -> 8.0%; driver executable 7.5% -> 14.0%.
+# Changed-package floors use measured coverage minus one point, rounded down
+# to one decimal. Unrelated package floors are preserved. Linux mount coverage
+# requires Linux tests; the Darwin development implementation has separate files.
 
 profile: coverage.out
 
 threshold:
   # Per-file floors are not enforced yet (many small files are untested).
   file: 0
-  # Packages not listed under override (cmd/tns-csi-driver) have no floor yet.
+  # Packages not listed under override have no floor yet.
   package: 0
-  total: 30
+  total: 37
 
 override:
   # First match wins, so keep specific paths before general ones.
   - path: ^pkg/driver$
-    threshold: 43
+    threshold: 49.2
   - path: ^pkg/tnsapi$
-    threshold: 38
+    threshold: 49.0
   - path: ^pkg/retry$
     threshold: 92
   - path: ^pkg/metrics$
@@ -36,7 +36,9 @@ override:
   - path: ^pkg/mount$
     threshold: 57
   - path: ^cmd/kubectl-tns-csi$
-    threshold: 2
+    threshold: 7.0
+  - path: ^cmd/tns-csi-driver$
+    threshold: 12.9
   # 10.0% once its query tests landed.
   - path: ^pkg/dashboard$
     threshold: 9

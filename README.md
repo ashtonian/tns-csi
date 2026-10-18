@@ -170,6 +170,8 @@ Compatibility tests run weekly and on-demand. See [Distro Compatibility Tests](d
 
 See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed installation and configuration instructions.
 
+Optional API key owner configuration enables `auth.login_ex` while existing URL/key-only configuration retains legacy authentication. See [authentication configuration](docs/AUTHENTICATION.md) for driver, chart and kubectl setup.
+
 ### Installation via Helm (Recommended)
 
 The TNS CSI Driver is published to both Docker Hub and GitHub Container Registry as OCI artifacts:

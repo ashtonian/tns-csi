@@ -6,10 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -33,6 +37,20 @@ func NewHelmDeployer(config *Config) *HelmDeployer {
 	return &HelmDeployer{config: config}
 }
 
+// createHelmKeyFile keeps credentials out of child argv and retained manifests.
+func createHelmKeyFile(key string) (path string, cleanup func() error, err error) {
+	dir, err := os.MkdirTemp("", "tns-csi-credentials-")
+	if err != nil {
+		return "", nil, fmt.Errorf("create private Helm credential directory: %w", err)
+	}
+	cleanup = func() error { return os.RemoveAll(dir) }
+	path = filepath.Join(dir, "api-key")
+	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
+		return "", nil, errors.Join(fmt.Errorf("write Helm credential file: %w", err), cleanup())
+	}
+	return path, cleanup, nil
+}
+
 // getChartPath returns the absolute path to the Helm chart.
 func getChartPath() (string, error) {
 	// Get the git repo root
@@ -48,12 +66,22 @@ func getChartPath() (string, error) {
 }
 
 // Deploy installs or upgrades the CSI driver using Helm.
-func (h *HelmDeployer) Deploy(protocol string) error {
+func (h *HelmDeployer) Deploy(protocol string) (deployErr error) {
 	chartPath, err := getChartPath()
 	if err != nil {
 		return fmt.Errorf("failed to get chart path: %w", err)
 	}
 
+	keyPath, removeKey, err := createHelmKeyFile(h.config.TrueNASAPIKey)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := removeKey(); err != nil {
+			klog.Error("Failed to remove temporary Helm credential file")
+			deployErr = errors.Join(deployErr, fmt.Errorf("remove temporary Helm credential file: %w", err))
+		}
+	}()
 	args := []string{
 		"upgrade", "--install",
 		helmReleaseName,
@@ -63,12 +91,13 @@ func (h *HelmDeployer) Deploy(protocol string) error {
 		"--wait",
 		flagTimeout, "8m",
 		flagSet, "truenas.url=wss://" + h.config.TrueNASHost + "/api/current",
-		flagSet, "truenas.apiKey=" + h.config.TrueNASAPIKey,
+		"--set-file", "truenas.apiKey=" + keyPath,
+		"--set-string", "truenas.username=" + h.config.TrueNASUsername,
 		flagSet, "truenas.pool=" + h.config.TrueNASPool,
 		flagSet, "image.repository=" + h.config.CSIImageRepo,
 		flagSet, "image.tag=" + h.config.CSIImageTag,
 		flagSet, "image.pullPolicy=" + h.config.CSIImagePullPolicy,
-		flagSet, "truenas.skipTLSVerify=true",
+		flagSet, "truenas.skipTLSVerify=" + strconv.FormatBool(h.config.TrueNASSkipTLSVerify),
 	}
 
 	// Enable snapshots for all protocols (required for snapshot tests)
@@ -255,6 +284,10 @@ func (h *HelmDeployer) runHelm(ctx context.Context, args ...string) error {
 
 	err := cmd.Run()
 	if err != nil {
+		// Helm can render Secrets on failure; deployment output is not safe evidence.
+		if len(args) > 0 && args[0] == "upgrade" {
+			return fmt.Errorf("helm upgrade failed: %w", err)
+		}
 		return fmt.Errorf("helm %s failed: %w\nstdout: %s\nstderr: %s",
 			args[0], err, stdout.String(), stderr.String())
 	}

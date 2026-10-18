@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,9 +20,10 @@ var (
 // Config holds the configuration for E2E tests.
 type Config struct {
 	// TrueNAS connection settings
-	TrueNASHost   string
-	TrueNASAPIKey string
-	TrueNASPool   string
+	TrueNASHost     string
+	TrueNASAPIKey   string
+	TrueNASUsername string
+	TrueNASPool     string
 
 	// CSI driver image settings
 	CSIImageRepo       string
@@ -38,25 +41,36 @@ type Config struct {
 	ClusterID string // Cluster ID for multi-cluster testing (E2E_CLUSTER_ID, default: "e2e-test-cluster")
 
 	// Test settings
-	Timeout time.Duration
-	Verbose bool // Enable verbose test output (E2E_VERBOSE=true)
+	Timeout              time.Duration
+	Verbose              bool // Enable verbose test output (E2E_VERBOSE=true)
+	TrueNASSkipTLSVerify bool // Explicit harness TLS mode; NewConfig preserves the legacy default.
 }
 
 // NewConfig creates a Config from environment variables.
 func NewConfig() (*Config, error) {
 	cfg := &Config{
-		TrueNASHost:        os.Getenv("TRUENAS_HOST"),
-		TrueNASAPIKey:      os.Getenv("TRUENAS_API_KEY"),
-		TrueNASPool:        getEnvOrDefault("TRUENAS_POOL", "csi"),
-		CSIImageRepo:       getEnvOrDefault("CSI_IMAGE_REPO", "ghcr.io/fenio/tns-csi"),
-		CSIImageTag:        getEnvOrDefault("CSI_IMAGE_TAG", "latest"),
-		CSIImagePullPolicy: getEnvOrDefault("CSI_IMAGE_PULL_POLICY", "Always"),
-		Kubeconfig:         getEnvOrDefault("KUBECONFIG", defaultKubeconfig()),
-		SMBUsername:        os.Getenv("SMB_USERNAME"),
-		SMBPassword:        os.Getenv("SMB_PASSWORD"),
-		ClusterID:          getEnvOrDefault("E2E_CLUSTER_ID", "e2e-test-cluster"),
-		Timeout:            parseDurationOrDefault(os.Getenv("TEST_TIMEOUT"), 5*time.Minute),
-		Verbose:            os.Getenv("E2E_VERBOSE") == "true",
+		TrueNASHost:          os.Getenv("TRUENAS_HOST"),
+		TrueNASAPIKey:        os.Getenv("TRUENAS_API_KEY"),
+		TrueNASUsername:      strings.TrimSpace(os.Getenv("TRUENAS_USERNAME")),
+		TrueNASSkipTLSVerify: true,
+		TrueNASPool:          getEnvOrDefault("TRUENAS_POOL", "csi"),
+		CSIImageRepo:         getEnvOrDefault("CSI_IMAGE_REPO", "ghcr.io/fenio/tns-csi"),
+		CSIImageTag:          getEnvOrDefault("CSI_IMAGE_TAG", "latest"),
+		CSIImagePullPolicy:   getEnvOrDefault("CSI_IMAGE_PULL_POLICY", "Always"),
+		Kubeconfig:           getEnvOrDefault("KUBECONFIG", defaultKubeconfig()),
+		SMBUsername:          os.Getenv("SMB_USERNAME"),
+		SMBPassword:          os.Getenv("SMB_PASSWORD"),
+		ClusterID:            getEnvOrDefault("E2E_CLUSTER_ID", "e2e-test-cluster"),
+		Timeout:              parseDurationOrDefault(os.Getenv("TEST_TIMEOUT"), 5*time.Minute),
+		Verbose:              os.Getenv("E2E_VERBOSE") == "true",
+	}
+
+	if raw := os.Getenv("TRUENAS_SKIP_TLS_VERIFY"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TRUENAS_SKIP_TLS_VERIFY: %w", strconv.ErrSyntax)
+		}
+		cfg.TrueNASSkipTLSVerify = value
 	}
 
 	if err := cfg.Validate(); err != nil {

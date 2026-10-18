@@ -36,9 +36,17 @@ type TrueNASVerifier struct {
 }
 
 // NewTrueNASVerifier creates a new TrueNASVerifier.
-func NewTrueNASVerifier(host, apiKey string) (*TrueNASVerifier, error) {
+func NewTrueNASVerifier(host, apiKey string, opts ...tnsapi.ClientOption) (*TrueNASVerifier, error) {
+	return newTrueNASVerifier(host, apiKey, true, opts...)
+}
+
+func newTrueNASVerifierForConfig(cfg *Config) (*TrueNASVerifier, error) {
+	return newTrueNASVerifier(cfg.TrueNASHost, cfg.TrueNASAPIKey, cfg.TrueNASSkipTLSVerify, tnsapi.WithUsername(cfg.TrueNASUsername))
+}
+
+func newTrueNASVerifier(host, apiKey string, skipTLSVerify bool, opts ...tnsapi.ClientOption) (*TrueNASVerifier, error) {
 	url := fmt.Sprintf("wss://%s/api/current", host)
-	client, err := tnsapi.NewClient(url, apiKey, true) // skip TLS verify for tests
+	client, err := tnsapi.NewClient(url, apiKey, skipTLSVerify, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to TrueNAS: %w", err)
 	}

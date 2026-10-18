@@ -31,3 +31,25 @@ func TestResolveAPIKey(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveAPIUsername(t *testing.T) {
+	for _, tc := range []struct{ name, flagValue, env, want string }{
+		{"absent", "", "", ""},
+		{"env", "", " env-user\n", "env-user"},
+		{"flag", " flag-user ", "env-user", "flag-user"},
+		{"blank flag falls back", " \n", "env-user", "env-user"},
+		{"blank env", "", " \n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(name string) string {
+				if name == truenasUsernameEnvName {
+					return tc.env
+				}
+				return ""
+			}
+			if got := resolveAPIUsername(tc.flagValue, getenv); got != tc.want {
+				t.Fatalf("username=%q; want %q", got, tc.want)
+			}
+		})
+	}
+}

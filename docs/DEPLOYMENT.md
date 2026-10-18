@@ -1,5 +1,7 @@
 # TrueNAS Scale CSI Driver - Deployment Guide
 
+See [authentication configuration](AUTHENTICATION.md) for optional API key owner usernames, existing Secrets, TLS and compatible rollback.
+
 **⚠️ EARLY DEVELOPMENT - NOT PRODUCTION READY**
 
 This driver is in early development phase. Use only for testing and evaluation environments. Use at your own risk.
