@@ -100,6 +100,7 @@ Every push to main triggers comprehensive integration tests organized into proto
 | `stress_test.go` | Multiple snapshots and volumes concurrently |
 | `volume_expansion_test.go` | Volume expansion |
 | `xfs_integrity_test.go` | Explicit `fsType: xfs`; fsynced 4 KiB–32 MiB files keep exact length and SHA-256 after remount in a new pod |
+| `xfs_clone_test.go` | Explicit `fsType: xfs` clone and snapshot restore mounted beside the running source pod; payload, XFS type and independence verified |
 | `zfsprops_test.go` | Custom ZFS properties via StorageClass |
 | `payload_test.go` | Shared payload write/verify helpers (no specs) |
 
