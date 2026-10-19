@@ -78,7 +78,14 @@ newest versioned path use the preloaded schema.
 
 Only a legacy boolean `true` or modern object with `response_type="SUCCESS"`
 authenticates. Rejected, expired, denied, malformed or unsupported login responses
-and mechanisms disallowed by server policy produce sanitized errors. A missing legacy method asks for the key owner's
+and mechanisms disallowed by server policy produce sanitized errors.
+
+A valid key whose owner has lost API access is reported differently by server
+release. TrueNAS 27 returns `DENIED`, which the client reports as
+`ErrAuthenticationDenied`. TrueNAS 25.10 and older API schemas return the same
+`AUTH_ERR` as a wrong key, so the client reports `ErrAuthenticationRejected`.
+The legacy method returns `false` in both cases. When a known-good key starts
+being rejected, also check the owner's privilege and group membership. A missing legacy method asks for the key owner's
 username; an unavailable modern method asks for the server/API configuration to
 be checked. There is no fallback after explicit modern configuration.
 
