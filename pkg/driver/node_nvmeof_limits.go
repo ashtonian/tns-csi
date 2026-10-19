@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/fenio/tns-csi/pkg/metrics"
 	"k8s.io/klog/v2"
 )
 
@@ -225,7 +226,7 @@ func (s *NodeService) enforceNVMeQueuePolicy(ctx context.Context, devicePath str
 	}
 	slices.Sort(paths)
 	for _, path := range paths {
-		if err := s.applyNVMeQueueLimits(ctx, path, params.policy, verify); err != nil {
+		if err := s.applyNVMeQueueLimits(ctx, path, params, verify); err != nil {
 			return identity, err
 		}
 	}
@@ -276,9 +277,9 @@ func nvmeAlignedCap(requested, current, hardware, logicalBytes uint64) (uint64, 
 	return capKiB, nil
 }
 
-func (s *NodeService) applyNVMeQueueLimits(ctx context.Context, path string, policy nvmePolicy, verify func() error) error {
-	capKiB, hasCap := policy.values[nvmeMaxSectorsKey]
-	readAhead, hasReadAhead := policy.values[nvmeReadAheadKey]
+func (s *NodeService) applyNVMeQueueLimits(ctx context.Context, path string, params *nvmeOFConnectionParams, verify func() error) error {
+	capKiB, hasCap := params.policy.values[nvmeMaxSectorsKey]
+	readAhead, hasReadAhead := params.policy.values[nvmeReadAheadKey]
 	if !hasCap && !hasReadAhead {
 		return verify()
 	}
@@ -303,11 +304,20 @@ func (s *NodeService) applyNVMeQueueLimits(ctx context.Context, path string, pol
 			if err := s.writeNVMeQueueValue(ctx, path, "max_sectors_kb", capKiB, verify); err != nil {
 				return err
 			}
+			recordNVMeQueueChange(path, "max_sectors_kb", current, capKiB, params.nqn)
 		}
 	}
 	if hasReadAhead {
-		if err := s.writeNVMeQueueValue(ctx, path, "read_ahead_kb", readAhead, verify); err != nil {
+		// Read after the cap write: the kernel may have recalculated readahead.
+		current, err := readNVMeQueueNumber(path, "read_ahead_kb")
+		if err != nil {
 			return err
+		}
+		if current != readAhead {
+			if err := s.writeNVMeQueueValue(ctx, path, "read_ahead_kb", readAhead, verify); err != nil {
+				return err
+			}
+			recordNVMeQueueChange(path, "read_ahead_kb", current, readAhead, params.nqn)
 		}
 	}
 	if err := verify(); err != nil {
@@ -327,6 +337,11 @@ func (s *NodeService) applyNVMeQueueLimits(ctx context.Context, path string, pol
 		}
 	}
 	return verify()
+}
+
+func recordNVMeQueueChange(path, key string, from, to uint64, nqn string) {
+	metrics.RecordNVMeQueuePolicyWrite(key)
+	klog.Infof("Applied NVMe queue policy to %s (NQN %s): %s %d -> %d KiB", filepath.Base(path), nqn, key, from, to)
 }
 
 func verifyNVMeQueueCap(path string, capKiB uint64) (uint64, error) {

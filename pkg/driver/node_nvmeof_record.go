@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 
+	"github.com/fenio/tns-csi/pkg/metrics"
 	"github.com/fenio/tns-csi/pkg/tnsapi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -102,10 +103,19 @@ func nvmeRecordTarget(volumeID string, params *nvmeOFConnectionParams) nvmeStore
 }
 
 // A profile is resolved anew on every call. Only explicit PV fields are durable.
-func (s *NodeService) prepareNVMePolicy(ctx context.Context, volumeID, devicePath, stagingPath string, params *nvmeOFConnectionParams) error {
+func (s *NodeService) prepareNVMePolicy(ctx context.Context, volumeID, devicePath, stagingPath string, params *nvmeOFConnectionParams) (resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	defer func() {
+		// Caller cancellation is not a policy refusal.
+		if resultErr == nil || ctx.Err() != nil {
+			return
+		}
+		reason := nvmePolicyRefusalReason(resultErr)
+		metrics.RecordNVMePolicyRefusal(reason)
+		klog.Warningf("Refusing NVMe policy step for volume %s on %s (NQN %s, reason %s): %v", volumeID, devicePath, params.nqn, reason, resultErr)
+	}()
 	record, err := s.readNVMeNodeRecord(volumeID, stagingPath)
 	if err != nil && !errors.Is(err, errNVMePolicyRecordNotFound) {
 		return status.Error(codes.FailedPrecondition, "retained node NVMe policy is unreadable; restore its metadata before use")
@@ -160,6 +170,23 @@ func removeNVMePolicyMarker(stagingPath string) error {
 		return nil
 	}
 	return err
+}
+
+// nvmePolicyRefusalReason maps an enforcement error to a bounded metric label.
+func nvmePolicyRefusalReason(err error) string {
+	switch {
+	case errors.Is(err, ErrNVMeIdentityConflict), errors.Is(err, errNVMeAmbiguousNamespace):
+		return "identity"
+	case errors.Is(err, ErrNVMeDiscoveryUnknown), errors.Is(err, errNVMeNoController):
+		return "unknown"
+	case errors.Is(err, errInvalidNVMePolicy):
+		return "invalid"
+	case status.Code(err) == codes.FailedPrecondition:
+		// prepareNVMePolicy reports unreadable or conflicting retained records this way.
+		return "record"
+	default:
+		return "other"
+	}
 }
 
 // Atomic replacement plus directory sync makes a successful stage restart-safe.

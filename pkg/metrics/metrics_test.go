@@ -22,6 +22,8 @@ func TestMetricsAvailability(t *testing.T) {
 	RecordWSMessageDuration("pool.dataset.create", 100*time.Millisecond)
 	SetWSConnectionDuration(5 * time.Minute)
 	SetVolumeCapacity("test-vol", ProtocolNFS, 1024*1024*1024)
+	RecordNVMeQueuePolicyWrite("max_sectors_kb")
+	RecordNVMePolicyRefusal("identity")
 
 	// Create a test HTTP server with the metrics handler
 	server := httptest.NewServer(promhttp.Handler())
@@ -63,6 +65,8 @@ func TestMetricsAvailability(t *testing.T) {
 		"tns_csi_websocket_message_duration_seconds",
 		"tns_csi_websocket_connection_duration_seconds",
 		"tns_csi_volume_capacity_bytes",
+		`tns_csi_nvme_queue_policy_writes_total{setting="max_sectors_kb"}`,
+		`tns_csi_nvme_policy_refusals_total{reason="identity"}`,
 	}
 
 	for _, metric := range expectedMetrics {
