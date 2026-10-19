@@ -177,6 +177,9 @@ parameters:
 | iSCSI | Linux | `noatime`, `_netdev` |
 | SMB | Linux | `vers=3.0`, `file_mode=0777`, `dir_mode=0777` |
 
+NVMe-oF and iSCSI also add `nouuid` when staging an XFS clone or snapshot restore,
+which keeps its source's filesystem UUID; see [XFS copies on the same node](CLONE-OPERATIONS.md#xfs-copies-on-the-same-node).
+
 **Example StorageClass with Custom Mount Options:**
 ```yaml
 apiVersion: storage.k8s.io/v1

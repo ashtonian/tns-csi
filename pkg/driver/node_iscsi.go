@@ -582,7 +582,10 @@ func (s *NodeService) formatAndMountISCSIDevice(ctx context.Context, volumeID, d
 	if mnt := volumeCapability.GetMount(); mnt != nil {
 		userMountOptions = mnt.MountFlags
 	}
-	mountOptions := getISCSIMountOptions(userMountOptions)
+	mountOptions, optionErr := s.copyMountOptions(ctx, devicePath, isClone, getISCSIMountOptions(userMountOptions))
+	if optionErr != nil {
+		return nil, optionErr
+	}
 
 	klog.V(4).Infof("iSCSI mount options: user=%v, final=%v", userMountOptions, mountOptions)
 

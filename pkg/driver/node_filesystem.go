@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +21,8 @@ import (
 const (
 	blkidPath  = "/sbin/blkid"
 	e2fsckPath = "/sbin/e2fsck"
+
+	xfsNoUUIDOption = "nouuid"
 )
 
 type keyedMutexEntry struct {
@@ -126,6 +129,29 @@ func detectBlockFilesystemType(ctx context.Context, devicePath string) (string, 
 		return "", status.Errorf(codes.FailedPrecondition, "no filesystem detected on %s", devicePath)
 	}
 	return fsType, nil
+}
+
+// copyMountOptions adds nouuid when staging an XFS clone or snapshot restore. The
+// copy keeps the source filesystem's UUID, and XFS refuses to mount a UUID that is
+// already mounted on the node. Other volumes keep that duplicate-mount guard. The
+// type comes from the device, so a requested fsType that differs cannot add an
+// option another filesystem rejects.
+func (s *NodeService) copyMountOptions(ctx context.Context, devicePath string, isClone bool, options []string) ([]string, error) {
+	if !isClone || slices.Contains(options, xfsNoUUIDOption) {
+		return options, nil
+	}
+	detect := s.detectFilesystemFn
+	if detect == nil {
+		detect = detectBlockFilesystemType
+	}
+	fsType, err := detect(ctx, devicePath)
+	if err != nil {
+		return nil, err
+	}
+	if fsType != fsTypeXFS {
+		return options, nil
+	}
+	return append(slices.Clone(options), xfsNoUUIDOption), nil
 }
 
 func (s *NodeService) checkFilesystemBeforeMount(ctx context.Context, devicePath, mode string, newlyFormatted bool) error {

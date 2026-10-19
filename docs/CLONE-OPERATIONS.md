@@ -283,6 +283,19 @@ With **Detached clones**:
 1. Delete either in any order
 2. No dependency constraints
 
+### XFS Copies on the Same Node
+
+Every clone, promoted clone, detached clone and snapshot restore of an NVMe-oF
+or iSCSI volume is a block-level copy, so an XFS copy keeps the source
+filesystem's UUID. Linux refuses to mount a second XFS filesystem whose UUID is
+already mounted on the node. When the device holds XFS, the node therefore adds
+`nouuid` while staging volumes created from a content source
+(`clonedFromSnapshot=true`, set for every copy, including existing PVs); a copy
+can then run on the same node as its source or other copies, and its log is
+replayed normally on first mount. Ordinary volumes keep the kernel's
+duplicate-mount guard. ext4 has no such check and is unchanged. The UUID is not
+rewritten, which would require clearing the log.
+
 ## Complete Examples
 
 ### StorageClass for Standard Volumes
