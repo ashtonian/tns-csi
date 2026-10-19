@@ -3,7 +3,6 @@ package nvmeof
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -25,6 +24,8 @@ var _ = Describe("NVMe-oF Block Mode", func() {
 		storageSize      = "1Gi"
 		// NVMe-oF block mode may need extra time for device setup
 		podTimeout = 360 * time.Second
+		// A multiple of every Linux logical block size (512 B to 64 KiB).
+		blockPayloadSize = 1 << 20
 	)
 
 	BeforeEach(func() {
@@ -101,22 +102,9 @@ var _ = Describe("NVMe-oF Block Mode", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("Writing known pattern to block device")
-		pattern := "BLOCK_TEST_PATTERN_12345"
-		_, err = f.K8s.ExecInPod(ctx, podName, []string{
-			"sh", "-c", "echo '" + pattern + "' | dd of=" + devicePath + " bs=512 count=1 conv=fsync 2>/dev/null",
-		})
+		By("Writing and verifying a logical-block-aligned random payload")
+		_, err = writeBlockPayload(ctx, podRunner(f, podName), devicePath, blockPayloadSize)
 		Expect(err).NotTo(HaveOccurred())
-
-		By("Reading and verifying pattern from block device")
-		output, err = f.K8s.ExecInPod(ctx, podName, []string{
-			"sh", "-c", "dd if=" + devicePath + " bs=512 count=1 2>/dev/null | head -c 25",
-		})
-		Expect(err).NotTo(HaveOccurred())
-		// Pattern verification (may have alignment issues with some devices)
-		if output != pattern {
-			By("Pattern verification warning: got '" + output + "' (this may be normal for some block devices)")
-		}
 
 		By("Testing larger I/O to verify device capacity (100MB)")
 		_, err = f.K8s.ExecInPod(ctx, podName, []string{
@@ -134,7 +122,6 @@ var _ = Describe("NVMe-oF Block Mode", func() {
 
 	It("should persist data on block device across POD restarts", func() {
 		blockMode := corev1.PersistentVolumeBlock
-		const testPattern = "PERSISTENT_BLOCK_DATA"
 
 		By("Creating Block mode PVC")
 		pvc, err := f.K8s.CreatePVC(ctx, framework.PVCOptions{
@@ -167,10 +154,8 @@ var _ = Describe("NVMe-oF Block Mode", func() {
 		err = f.K8s.WaitForPodReady(ctx, firstPodName, podTimeout)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("Writing to POD")
-		_, err = f.K8s.ExecInPod(ctx, firstPodName, []string{
-			"sh", "-c", "echo '" + testPattern + "' | dd of=" + devicePath + " bs=512 count=1 conv=fsync 2>/dev/null",
-		})
+		By("Writing a logical-block-aligned random payload in the first POD")
+		written, err := writeBlockPayload(ctx, podRunner(f, firstPodName), devicePath, blockPayloadSize)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Deleting first POD")
@@ -203,13 +188,8 @@ var _ = Describe("NVMe-oF Block Mode", func() {
 		err = f.K8s.WaitForPodReady(ctx, secondPodName, podTimeout)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("Reading pattern from block device in second POD")
-		output, err := f.K8s.ExecInPod(ctx, secondPodName, []string{
-			"sh", "-c", fmt.Sprintf("dd if=%s bs=512 count=1 2>/dev/null | head -c %d", devicePath, len(testPattern)),
-		})
-		Expect(err).NotTo(HaveOccurred())
-		// Note: Due to potential alignment issues, we check if pattern is contained
-		Expect(output).To(Or(Equal(testPattern), ContainSubstring(testPattern[:10])),
-			"Data should persist on block device across POD restarts")
+		By("Verifying the exact payload from the second POD")
+		err = verifyBlockPayload(ctx, podRunner(f, secondPodName), devicePath, written)
+		Expect(err).NotTo(HaveOccurred(), "Data should persist on block device across POD restarts")
 	})
 })
