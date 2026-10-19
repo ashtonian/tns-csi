@@ -156,17 +156,23 @@ func (s *NodeService) stageBlockDevice(devicePath, stagingTargetPath string) (*c
 	}
 
 	// Check if staging path already exists
-	if _, err := os.Stat(stagingTargetPath); err == nil {
-		// Staging path exists - check if it's a valid symlink or device
-		klog.V(4).Infof("Staging path %s already exists", stagingTargetPath)
-		// Verify it points to the correct device
-		targetDevice, err := filepath.EvalSymlinks(stagingTargetPath)
-		if err == nil && targetDevice == devicePath {
-			klog.V(4).Infof("Staging path already points to correct device")
-			return &csi.NodeStageVolumeResponse{}, nil
+	if info, err := os.Stat(stagingTargetPath); err == nil {
+		if info.IsDir() {
+			// kubelet creates the staging path as a directory before NodeStageVolume.
+			// os.Remove below refuses a populated directory.
+			klog.V(4).Infof("Replacing staging directory %s with a link to %s", stagingTargetPath, devicePath)
+		} else {
+			// Staging path exists - check if it's a valid symlink or device
+			klog.V(4).Infof("Staging path %s already exists", stagingTargetPath)
+			// Verify it points to the correct device
+			targetDevice, err := filepath.EvalSymlinks(stagingTargetPath)
+			if err == nil && targetDevice == devicePath {
+				klog.V(4).Infof("Staging path already points to correct device")
+				return &csi.NodeStageVolumeResponse{}, nil
+			}
+			// Remove existing staging path if it doesn't match
+			klog.Warningf("Removing incorrect staging path: %s", stagingTargetPath)
 		}
-		// Remove existing staging path if it doesn't match
-		klog.Warningf("Removing incorrect staging path: %s", stagingTargetPath)
 		if err := os.Remove(stagingTargetPath); err != nil {
 			return nil, status.Errorf(codes.Internal, "Failed to remove incorrect staging path: %v", err)
 		}
