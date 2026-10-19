@@ -78,6 +78,7 @@ Every push to main triggers comprehensive integration tests organized into proto
 | `delete_strategy_retain_test.go` | Volume retention on PVC deletion |
 | `detached_snapshot_test.go` | Snapshot lifecycle without attached pods |
 | `persistence_test.go` | Data survives pod restarts |
+| `queue_policy_test.go` | StorageClass `nvmeof.max-sectors-kb`/`nvmeof.read-ahead-kb` observed on the namespace queue after first stage, online expansion and restage |
 | `statefulset_test.go` | StatefulSet with VolumeClaimTemplates |
 | `zfsprops_test.go` | Custom ZFS properties via StorageClass |
 
