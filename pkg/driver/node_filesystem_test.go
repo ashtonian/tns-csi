@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -421,5 +422,51 @@ func TestTruncateCommandOutput(t *testing.T) {
 	got := truncateCommandOutput(longOutput)
 	if len(got) >= len(longOutput) || !strings.HasSuffix(got, "... (truncated)") {
 		t.Fatalf("truncateCommandOutput() did not truncate output: length=%d", len(got))
+	}
+}
+
+func TestCopyMountOptions(t *testing.T) {
+	probeErr := status.Error(codes.FailedPrecondition, "no filesystem detected")
+	tests := []struct {
+		detectErr  error
+		name       string
+		detected   string
+		options    []string
+		want       []string
+		isClone    bool
+		wantDetect bool
+	}{
+		{name: "ordinary XFS volume keeps the duplicate-mount guard", options: []string{"noatime"}, detected: fsTypeXFS, want: []string{"noatime"}},
+		{name: "XFS clone or restore adds nouuid", options: []string{"noatime"}, detected: fsTypeXFS, isClone: true, wantDetect: true, want: []string{"noatime", "nouuid"}},
+		{name: "ext4 copy is unchanged", options: []string{"noatime"}, detected: fsTypeExt4, isClone: true, wantDetect: true, want: []string{"noatime"}},
+		{name: "StorageClass nouuid is not repeated", options: []string{"nouuid", "noatime"}, detected: fsTypeXFS, isClone: true, want: []string{"nouuid", "noatime"}},
+		{name: "undetectable copy refuses to mount", options: []string{"noatime"}, detectErr: probeErr, isClone: true, wantDetect: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewNodeService("test", nil, true, nil, false, 1)
+			detected := false
+			s.detectFilesystemFn = func(_ context.Context, device string) (string, error) {
+				detected = true
+				if device != "/dev/nvme4n1" {
+					t.Errorf("detected %s, want /dev/nvme4n1", device)
+				}
+				return tt.detected, tt.detectErr
+			}
+			// Spare capacity would expose an append that writes into the caller's array.
+			options := append(make([]string, 0, len(tt.options)+1), tt.options...)
+			backing := options[:cap(options)]
+			before := slices.Clone(backing)
+			got, err := s.copyMountOptions(context.Background(), "/dev/nvme4n1", tt.isClone, options)
+			if !errors.Is(err, tt.detectErr) || detected != tt.wantDetect {
+				t.Fatalf("copyMountOptions() error = %v, detected = %v; want %v, %v", err, detected, tt.detectErr, tt.wantDetect)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("copyMountOptions() = %q, want %q", got, tt.want)
+			}
+			if !slices.Equal(backing, before) {
+				t.Fatalf("copyMountOptions() wrote into the caller's array: %q", backing)
+			}
+		})
 	}
 }

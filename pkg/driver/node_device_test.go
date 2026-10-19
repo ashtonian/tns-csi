@@ -161,43 +161,39 @@ func TestInterpretEmptyFilesystemProbe(t *testing.T) {
 }
 
 func TestCheckDeviceFilesystemFailedProbeCannotFormat(t *testing.T) {
-	binDir := t.TempDir()
-	for name, script := range map[string]string{
-		"lsblk": "#!/bin/sh\nprintf '\\n'\n",
-		"blkid": "#!/bin/sh\nexit 4\n",
-	} {
-		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
+	exitFour := exec.CommandContext(context.Background(), "/bin/sh", "-c", "exit 4").Run()
+	probes := filesystemProbes{
+		lsblk:  func(context.Context, string) ([]byte, error) { return []byte("\n"), nil },
+		direct: func(context.Context, string) ([]byte, error) { return nil, exitFour },
+		blkid: func(context.Context, string) ([]byte, error) {
+			t.Fatal("confirmation probe ran without lsblk metadata")
+			return nil, nil
+		},
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	format, _, err := checkDeviceFilesystemWithProbe(context.Background(), "/dev/test", func(probeCtx context.Context, path string) ([]byte, error) {
-		return exec.CommandContext(probeCtx, filepath.Join(binDir, "blkid"), path).CombinedOutput()
-	})
+	format, _, err := checkDeviceFilesystemWith(context.Background(), "/dev/test", probes)
 	if format || err == nil {
 		t.Fatalf("checkDeviceFilesystem() = %v, %v; want false, error", format, err)
 	}
 }
 
+// The probes run in-process so that no wall-clock budget can expire on a loaded host
+// before cancellation reaches the direct probe.
 func TestCheckDeviceFilesystemCanceledProbeCannotFormat(t *testing.T) {
-	binDir := t.TempDir()
-	for name, script := range map[string]string{
-		"lsblk": "#!/bin/sh\nprintf '\\n'\n",
-		"blkid": "#!/bin/sh\nexit 2\n",
-	} {
-		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	format, _, err := checkDeviceFilesystemWithProbe(ctx, "/dev/test", func(probeCtx context.Context, path string) ([]byte, error) {
-		// Cancel only after lsblk has finished and the direct probe is reached.
-		// A short wall-clock deadline can instead kill lsblk on a loaded runner.
-		cancel()
-		return exec.CommandContext(probeCtx, filepath.Join(binDir, "blkid"), path).CombinedOutput()
-	})
+	probes := filesystemProbes{
+		lsblk: func(context.Context, string) ([]byte, error) { return []byte("\n"), nil },
+		direct: func(probeCtx context.Context, _ string) ([]byte, error) {
+			cancel()
+			<-probeCtx.Done()
+			return nil, probeCtx.Err()
+		},
+		blkid: func(context.Context, string) ([]byte, error) {
+			t.Fatal("confirmation probe ran without lsblk metadata")
+			return nil, nil
+		},
+	}
+	format, _, err := checkDeviceFilesystemWith(ctx, "/dev/test", probes)
 	if format || !errors.Is(err, context.Canceled) {
 		t.Fatalf("checkDeviceFilesystem() = %v, %v; want false, context canceled", format, err)
 	}

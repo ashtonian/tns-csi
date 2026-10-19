@@ -621,7 +621,10 @@ func (s *NodeService) formatAndMountNVMeDevice(ctx context.Context, volumeID, de
 	if mnt := volumeCapability.GetMount(); mnt != nil {
 		userMountOptions = mnt.MountFlags
 	}
-	mountOptions := getNVMeOFMountOptions(userMountOptions)
+	mountOptions, optionErr := s.copyMountOptions(ctx, devicePath, isClone, getNVMeOFMountOptions(userMountOptions))
+	if optionErr != nil {
+		return nil, optionErr
+	}
 
 	klog.V(4).Infof("NVMe-oF mount options: user=%v, final=%v", userMountOptions, mountOptions)
 
