@@ -141,6 +141,8 @@ again from the current config. Expansion, which has no VolumeContext, uses these
 records after a restart. Keep the chart's persistent `/var/lib/tns-csi` host mount.
 Corrupt, unsupported or conflicting records require restoration; they are not
 discarded automatically. Records remain after unstage to preserve provenance.
+Successful unstage removes the staging marker with the NQN sidecar, so kubelet can
+delete the staging directory; the next stage writes the marker again.
 
 An existing volume with no node record must pass a normal stage/restage before
 expansion under a configured profile. This binds the immutable PV endpoint to

@@ -152,6 +152,16 @@ func (s *NodeService) prepareNVMePolicy(ctx context.Context, volumeID, devicePat
 	return ctx.Err()
 }
 
+// The CO deletes the staging path's parent after unstage, so the marker must not outlive
+// the stage. The durable record in the policy directory is retained.
+func removeNVMePolicyMarker(stagingPath string) error {
+	err := os.Remove(stagingPath + nvmePolicyMarkerSuffix)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // Atomic replacement plus directory sync makes a successful stage restart-safe.
 func writeNVMePolicyFile(ctx context.Context, path string, data []byte) (resultErr error) {
 	if err := ctx.Err(); err != nil {

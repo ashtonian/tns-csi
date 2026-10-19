@@ -401,6 +401,10 @@ func (s *NodeService) unstageNVMeOFVolume(ctx context.Context, req *csi.NodeUnst
 	if err := s.disconnectNVMeOF(ctx, nqn); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to disconnect NVMe-oF volume %s (NQN %s): %v", volumeID, nqn, err)
 	}
+	// Remove the marker while the NQN sidecar still routes a retry through NVMe unstage.
+	if err := removeNVMePolicyMarker(stagingTargetPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "disconnected NVMe-oF volume %s but failed to remove staging policy marker: %v", volumeID, err)
+	}
 	if err := removeNVMeStagingNQN(stagingTargetPath); err != nil {
 		return nil, status.Errorf(codes.Internal, "disconnected NVMe-oF volume %s but failed to remove staging metadata: %v", volumeID, err)
 	}

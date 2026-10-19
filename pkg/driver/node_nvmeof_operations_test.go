@@ -78,6 +78,9 @@ func TestNVMeUnstageRefusesUnsafeScope(t *testing.T) {
 			}
 			t.Cleanup(func() { lookupMountedEntry = origLookup })
 			stage := filepath.Join(t.TempDir(), "stage")
+			if err := os.WriteFile(stage+nvmePolicyMarkerSuffix, []byte(nvmeRecordName("volume")), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			_, err := s.unstageNVMeOFVolume(context.Background(), &csi.NodeUnstageVolumeRequest{VolumeId: "volume", StagingTargetPath: stage}, map[string]string{"nqn": nqnA})
 			want := codes.FailedPrecondition
 			if failure == "unknown-users" {
@@ -89,7 +92,52 @@ func TestNVMeUnstageRefusesUnsafeScope(t *testing.T) {
 			if got, readErr := readNVMeStagingNQN(stage); readErr != nil || got != nqnA {
 				t.Fatalf("retained NQN = %q, %v", got, readErr)
 			}
+			if _, statErr := os.Stat(stage + nvmePolicyMarkerSuffix); statErr != nil {
+				t.Fatalf("refused unstage removed policy marker: %v", statErr)
+			}
 		})
+	}
+}
+
+// kubelet removes the staging path's parent directory after unstage and fails while it is not empty.
+func TestNVMeUnstageRemovesStagingMetadata(t *testing.T) {
+	useFakeSysBlock(t, map[string]string{"nvme4": nqnA}, map[string]string{"nvme4n1": "nvme4"})
+	fakeSysClassNVMe(t, map[string]string{"nvme4": nqnA})
+	origLookup := lookupMountedEntry
+	lookupMountedEntry = func(context.Context, string) (mount.Entry, bool, error) { return mount.Entry{}, false, nil }
+	t.Cleanup(func() { lookupMountedEntry = origLookup })
+	s := NewNodeService("test", nil, true, nil, false, 1)
+	s.nvmePolicyDirectory = filepath.Join(t.TempDir(), "records")
+	s.isSourceMountedFn = func(context.Context, string) (bool, error) { return false, nil }
+	s.disconnectNVMeOFFn = func(context.Context, string) error { return nil }
+	volumeDir := t.TempDir()
+	stage := filepath.Join(volumeDir, "globalmount")
+	if err := os.Mkdir(stage, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNVMeStagingNQN(stage, nqnA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(s.nvmePolicyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(s.nvmePolicyDirectory, nvmeRecordName("volume"))
+	for _, path := range []string{record, stage + nvmePolicyMarkerSuffix} {
+		if err := os.WriteFile(path, []byte(nvmeRecordName("volume")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.unstageNVMeOFVolume(context.Background(), &csi.NodeUnstageVolumeRequest{VolumeId: "volume", StagingTargetPath: stage}, map[string]string{"nqn": nqnA}); err != nil {
+		t.Fatalf("unstage: %v", err)
+	}
+	if err := os.Remove(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(volumeDir); err != nil {
+		t.Fatalf("staging parent is not removable after unstage: %v", err)
+	}
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("durable policy record was not retained: %v", err)
 	}
 }
 
