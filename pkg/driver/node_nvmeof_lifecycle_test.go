@@ -84,6 +84,30 @@ func TestNVMeRemovalRequiresReadableIdentities(t *testing.T) {
 	}
 }
 
+// The kernel removes a controller's /sys/class/nvme link before its attributes, so an
+// entry that vanished after listing is absent, not unknown.
+func TestNVMeControllerRemovedAfterListingIsAbsent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "nvme")
+	if err := os.Mkdir(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "removed-nvme4"), filepath.Join(root, "nvme4")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestSubsystemNQN(t, root, "nvme5", nqnB)
+	if present, err := nvmeNQNPresent(root, nqnA); err != nil || present {
+		t.Fatalf("presence = %v, %v; want false, nil", present, err)
+	}
+	useFakeSysBlock(t, map[string]string{}, map[string]string{})
+	origClass := sysClassNVMePath
+	sysClassNVMePath = root
+	t.Cleanup(func() { sysClassNVMePath = origClass })
+	s := NewNodeService("test", nil, true, nil, false, 1)
+	if _, _, err := s.findNVMeDeviceFromSys(context.Background(), nqnA); !errors.Is(err, ErrNVMeDeviceNotFound) {
+		t.Fatalf("sysfs lookup = %v; want ErrNVMeDeviceNotFound", err)
+	}
+}
+
 func TestNVMeNamespaceLookupPreservesIdentityReadFailure(t *testing.T) {
 	block := fakeSysBlock(t, map[string]string{"nvme4": nqnA}, map[string]string{"nvme4n1": "nvme4"}, nil)
 	identity := filepath.Join(block, "nvme4n1", "device", "subsysnqn")
