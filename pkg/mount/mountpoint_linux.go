@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -52,7 +53,7 @@ func lookupMount(mountInfoFile, target string) (Entry, bool, error) {
 		return Entry{}, false, nil
 	}
 	top := topmostMount(matches)
-	return Entry{Source: unescapeMountField(top.Source), FSType: top.FsType}, true, nil
+	return Entry{Source: unescapeMountField(top.Source), FSType: top.FsType, Device: strconv.Itoa(top.Major) + ":" + strconv.Itoa(top.Minor)}, true, nil
 }
 
 // topmostMount picks the visible mount from mounts stacked on one mount point. A mount
