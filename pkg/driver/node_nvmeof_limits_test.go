@@ -451,3 +451,55 @@ func TestNVMeExpansionCannotMistakeLostRecordForLegacyPolicy(t *testing.T) {
 		})
 	}
 }
+
+// Only changed settings are written, so policy write metrics measure drift.
+func TestNVMeQueuePolicyWritesOnlyChangedSettings(t *testing.T) {
+	s, parameters, writes := nvmeLimitFixture(t, true)
+	params, err := s.validateNVMeOFParams(parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(t.TempDir(), "stage")
+	if err := s.prepareNVMePolicy(context.Background(), "volume", "/dev/nvme0n1", stage, params); err != nil {
+		t.Fatal(err)
+	}
+	if len(*writes) != 4 {
+		t.Fatalf("first enforcement writes=%v; want cap and readahead on head and path", *writes)
+	}
+	*writes = (*writes)[:0]
+	if err := s.prepareNVMePolicy(context.Background(), "volume", "/dev/nvme0n1", stage, params); err != nil {
+		t.Fatal(err)
+	}
+	if len(*writes) != 0 {
+		t.Fatalf("compliant queues were rewritten: %v", *writes)
+	}
+	// A kernel limits update restores the default readahead on the head only.
+	head := filepath.Join(sysBlockPath, "nvme0n1")
+	writeNVMeFixtureValue(t, filepath.Join(head, "queue", "read_ahead_kb"), "128")
+	if err := s.prepareNVMePolicy(context.Background(), "volume", "/dev/nvme0n1", stage, params); err != nil {
+		t.Fatal(err)
+	}
+	if want := []nvmeQueueWrite{{head, "read_ahead_kb", 0}}; !reflect.DeepEqual(*writes, want) {
+		t.Fatalf("drift writes=%v; want %v", *writes, want)
+	}
+}
+
+func TestNVMePolicyRefusalReason(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{err: fmt.Errorf("stage: %w", ErrNVMeIdentityConflict), want: "identity"},
+		{err: errNVMeAmbiguousNamespace, want: "identity"},
+		{err: errors.Join(ErrNVMeDiscoveryUnknown, os.ErrNotExist), want: "unknown"},
+		{err: errNVMeNoController, want: "unknown"},
+		{err: fmt.Errorf("cap: %w", errInvalidNVMePolicy), want: "invalid"},
+		{err: status.Error(codes.FailedPrecondition, "retained node NVMe policy is unreadable"), want: "record"},
+		{err: os.ErrPermission, want: "other"},
+	}
+	for _, tt := range tests {
+		if got := nvmePolicyRefusalReason(tt.err); got != tt.want {
+			t.Errorf("nvmePolicyRefusalReason(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}

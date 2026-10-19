@@ -198,6 +198,25 @@ var (
 		},
 	)
 
+	// NVMe-oF scoped policy metrics. Labels are fixed sets, never device names.
+	nvmeQueuePolicyWritesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "nvme_queue_policy_writes_total",
+			Help:      "Namespace queue settings changed by the scoped NVMe-oF policy; growth on existing volumes indicates drift",
+		},
+		[]string{"setting"},
+	)
+
+	nvmePolicyRefusalsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "nvme_policy_refusals_total",
+			Help:      "NVMe-oF stage, publish or expansion steps refused because policy or namespace identity could not be established",
+		},
+		[]string{"reason"},
+	)
+
 	// Volume capacity metrics.
 	volumeCapacityBytes = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -271,6 +290,16 @@ func NVMeConnectStart() { nvmeConnectConcurrent.Inc() }
 
 // NVMeConnectDone decrements the concurrent gauge.
 func NVMeConnectDone() { nvmeConnectConcurrent.Dec() }
+
+// RecordNVMeQueuePolicyWrite counts a queue setting the NVMe-oF policy changed.
+func RecordNVMeQueuePolicyWrite(setting string) {
+	nvmeQueuePolicyWritesTotal.WithLabelValues(setting).Inc()
+}
+
+// RecordNVMePolicyRefusal counts a node step refused by NVMe-oF policy enforcement.
+func RecordNVMePolicyRefusal(reason string) {
+	nvmePolicyRefusalsTotal.WithLabelValues(reason).Inc()
+}
 
 // OperationTimer helps time operations and record metrics automatically.
 type OperationTimer struct {

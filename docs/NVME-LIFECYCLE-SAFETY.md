@@ -128,6 +128,17 @@ and before and after filesystem expansion. Raw-block expansion verifies policy
 before returning its no-filesystem-resize success. Without policy, old volumes
 keep their existing behavior.
 
+Only settings that differ are written. Each change is logged at Info with the
+device, NQN and old and new values, and counted in
+`tns_csi_nvme_queue_policy_writes_total{setting}`; growth for an already staged
+volume means something else (for example a kernel limits update after reconnect)
+changed the queue and a later check restored it. Each refused step is logged at
+Warning with the volume, device, NQN and reason, and counted in
+`tns_csi_nvme_policy_refusals_total{reason}`, where `reason` is `identity`,
+`unknown`, `invalid`, `record` or `other`. Caller cancellation is not counted.
+Requested queue counts and depths are connect arguments, not negotiated values,
+and are not reported as such.
+
 Explicit policy and endpoint provenance are stored in the optional ZFS user
 property `tns-csi:nvmeof_policy`. Retries cannot silently change or omit retained
 explicit settings. Clone records bind to the destination volume and NQN rather

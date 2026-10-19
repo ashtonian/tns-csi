@@ -47,6 +47,22 @@ Protocol-specific volume operations (NFS, NVMe-oF, iSCSI, and SMB):
   - Number of NVMe-oF connect operations waiting for the semaphore
   - Non-zero values indicate the concurrency limit is actively throttling connections
 
+### NVMe-oF Scoped Policy Metrics
+
+Queue writes happen only for volumes a node profile or explicit PV policy scopes
+to pinned endpoints; refusals also include unreadable or conflicting retained node
+records. See [NVMe connection and queue policy](NVME-LIFECYCLE-SAFETY.md#enforcement-and-restart-behavior).
+
+- **`tns_csi_nvme_queue_policy_writes_total`** (counter)
+  - Queue settings the policy changed on a namespace head or path queue
+  - Labels: `setting` (`max_sectors_kb`, `read_ahead_kb`)
+  - Writes happen on first use; later growth for staged volumes indicates drift that a check corrected
+
+- **`tns_csi_nvme_policy_refusals_total`** (counter)
+  - NVMe-oF stage, publish or expansion steps refused because policy or namespace identity could not be established
+  - Labels: `reason` (`identity`, `unknown`, `invalid`, `record`, `other`)
+  - Any increase needs investigation; the matching Warning log names the volume, device and NQN
+
 ### WebSocket Connection Metrics
 
 Metrics for the TrueNAS API WebSocket connection:
@@ -163,6 +179,18 @@ sum by (protocol, operation) (rate(tns_volume_operations_total[5m]))
 95th percentile volume operation latency:
 ```promql
 histogram_quantile(0.95, rate(tns_volume_operations_duration_seconds_bucket[5m]))
+```
+
+### NVMe-oF Policy
+
+Refused NVMe-oF steps by reason:
+```promql
+sum by (reason) (increase(tns_csi_nvme_policy_refusals_total[1h]))
+```
+
+Queue settings corrected by the policy:
+```promql
+sum by (setting) (increase(tns_csi_nvme_queue_policy_writes_total[1h]))
 ```
 
 ### WebSocket Health
