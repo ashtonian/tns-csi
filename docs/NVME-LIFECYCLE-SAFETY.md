@@ -7,6 +7,11 @@ staging source and observed namespace users. Missing or unreadable identity is
 an error, never proof that a controller disappeared. The plain-text staging NQN
 sidecar remains compatible with previous versions.
 
+Stage refuses a staging path that already belongs to another or an unknown
+namespace. A raw-block staging path may be absent, the empty directory kubelet
+creates before NodeStageVolume, or a link to a namespace with the requested NQN;
+a populated directory, regular file or other link is refused.
+
 Unstage depends on completed CSI unpublish ordering. A negative mount scan does
 not exclude arbitrary external mounts or open raw-device handles and does not
 provide fencing. Intentional raw-block RWX remains supported. There is no
@@ -136,6 +141,8 @@ again from the current config. Expansion, which has no VolumeContext, uses these
 records after a restart. Keep the chart's persistent `/var/lib/tns-csi` host mount.
 Corrupt, unsupported or conflicting records require restoration; they are not
 discarded automatically. Records remain after unstage to preserve provenance.
+Successful unstage removes the staging marker with the NQN sidecar, so kubelet can
+delete the staging directory; the next stage writes the marker again.
 
 An existing volume with no node record must pass a normal stage/restage before
 expansion under a configured profile. This binds the immutable PV endpoint to

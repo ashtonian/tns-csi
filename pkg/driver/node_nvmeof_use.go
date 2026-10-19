@@ -32,6 +32,17 @@ func (s *NodeService) verifyNVMeStagingSource(ctx context.Context, path, nqn str
 	if err != nil {
 		return err
 	}
+	if info.IsDir() {
+		// kubelet creates the raw-block staging path as an empty directory before NodeStageVolume.
+		entries, readErr := os.ReadDir(path)
+		if readErr != nil {
+			return readErr
+		}
+		if len(entries) > 0 {
+			return ErrNVMeIdentityConflict
+		}
+		return nil
+	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		return ErrNVMeIdentityConflict
 	}

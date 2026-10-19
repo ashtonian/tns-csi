@@ -85,16 +85,23 @@ Every push to main triggers comprehensive integration tests organized into proto
 
 | Test File | Description |
 |-----------|-------------|
-| `basic_test.go` | Volume provisioning, mounting, I/O operations, deletion |
 | `access_modes_test.go` | RWO access mode validation |
-| `block_mode_test.go` | Raw block device mode testing |
-| `clone_test.go` | Volume cloning from snapshots |
-| `concurrent_test.go` | 5 simultaneous volume creations |
+| `adoption_test.go` | Volume adoption for GitOps workflows |
+| `block_mode_test.go` | Raw block devices; exact-length, logical-block-aligned SHA-256 read-back in the writing pod and in a new pod |
+| `clone_test.go` | Volume cloning and data independence |
+| `concurrent_test.go` | Concurrent PVC/pod creation and sequential pod failover |
 | `delete_strategy_retain_test.go` | Volume retention on PVC deletion |
-| `detached_snapshot_test.go` | Snapshot lifecycle without attached pods |
-| `persistence_test.go` | Data survives pod restarts |
+| `detached_snapshot_advanced_test.go` | Detached snapshots via zfs send/receive and restore |
+| `detached_snapshot_independence_test.go` | Detached snapshots without a ZFS clone dependency |
+| `name_templating_test.go` | Templated volume names from StorageClass parameters |
+| `persistence_test.go` | Data survives a forced pod deletion (pod lifecycle, not a target crash) |
+| `snapshot_restore_test.go` | Point-in-time restore from multiple snapshots |
 | `statefulset_test.go` | StatefulSet with VolumeClaimTemplates |
+| `stress_test.go` | Multiple snapshots and volumes concurrently |
+| `volume_expansion_test.go` | Volume expansion |
+| `xfs_integrity_test.go` | Explicit `fsType: xfs`; fsynced 4 KiB–32 MiB files keep exact length and SHA-256 after remount in a new pod |
 | `zfsprops_test.go` | Custom ZFS properties via StorageClass |
+| `payload_test.go` | Shared payload write/verify helpers (no specs) |
 
 #### iSCSI Test Suite (`tests/e2e/iscsi/`)
 
@@ -255,6 +262,7 @@ make test-e2e-iscsi
 - **Resource Cleanup** - Orphaned resource detection
 - **ZFS Properties** - Custom compression, recordsize, etc.
 - **Block Mode** - Raw block device support (NVMe-oF)
+- **XFS Integrity** - Exact file contents across remount (NVMe-oF)
 
 ### What's Not Yet Tested
 
