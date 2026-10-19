@@ -280,6 +280,9 @@ func nvmeNQNPresent(sysClassPath, nqn string) (bool, error) {
 		}
 
 		identity, readErr := readNVMeControllerNQN(sysClassPath, name)
+		if errors.Is(readErr, errNVMeControllerRemoved) {
+			continue
+		}
 		if readErr != nil {
 			return false, readErr
 		}

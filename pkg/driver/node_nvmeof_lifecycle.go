@@ -23,6 +23,8 @@ var (
 	ErrNVMeDiscoveryUnknown = errors.New("NVMe discovery evidence is incomplete")
 	// ErrNVMeIdentityConflict means the requested transition affects a different identity or user.
 	ErrNVMeIdentityConflict = errors.New("NVMe identity conflict")
+
+	errNVMeControllerRemoved = errors.New("NVMe controller was removed during inspection")
 )
 
 type nvmeLifecycleOperations struct {
@@ -117,8 +119,15 @@ func waitNVMeContext(ctx context.Context, delay time.Duration) error {
 }
 
 // readNVMeControllerNQN never treats an unreadable identity as a negative match.
+// The kernel removes a controller's class link before its attributes, so a listed
+// controller whose entry has since vanished is reported as removed, not unknown.
 func readNVMeControllerNQN(root, controller string) (string, error) {
 	nqn, err := readSysfsValue(filepath.Join(root, controller, "subsysnqn"))
+	if errors.Is(err, fs.ErrNotExist) {
+		if _, statErr := os.Stat(filepath.Join(root, controller)); errors.Is(statErr, fs.ErrNotExist) {
+			return "", errNVMeControllerRemoved
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("%w: %s: %w", ErrNVMeDiscoveryUnknown, controller, err)
 	}

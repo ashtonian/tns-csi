@@ -117,11 +117,16 @@ func TestNVMeNQNPresentUsesExactIdentity(t *testing.T) {
 
 func TestWaitForNVMeNQNRemoval(t *testing.T) {
 	sysClassPath := t.TempDir()
-	nqnPath := writeTestSubsystemNQN(t, sysClassPath, "nvme4", "nqn.2026-02.csi.tns:volume")
+	device := filepath.Dir(writeTestSubsystemNQN(t, t.TempDir(), "nvme4", "nqn.2026-02.csi.tns:volume"))
+	link := filepath.Join(sysClassPath, "nvme4")
+	if err := os.Symlink(device, link); err != nil {
+		t.Fatal(err)
+	}
 	removed := make(chan error, 1)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		removed <- os.RemoveAll(filepath.Dir(nqnPath))
+		// device_del removes the class link before the device attributes.
+		removed <- errors.Join(os.Remove(link), os.RemoveAll(device))
 	}()
 
 	err := waitForNVMeNQNRemovalAt(context.Background(), sysClassPath, "nqn.2026-02.csi.tns:volume", time.Second, 5*time.Millisecond)

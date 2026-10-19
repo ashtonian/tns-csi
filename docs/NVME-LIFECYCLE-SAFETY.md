@@ -3,8 +3,9 @@
 Failed discovery, capacity checks, connection attempts, staging or caller
 cancellation retain the NVMe connection. A later CSI retry can observe it again.
 Only explicit unstage disconnects a subsystem, after checking its exact NQN,
-staging source and observed namespace users. Missing or unreadable identity is
-an error, never proof that a controller disappeared. The plain-text staging NQN
+staging source and observed namespace users. Missing or unreadable identity of a
+controller that is still listed is an error, never proof that it disappeared; a
+controller whose `/sys/class/nvme` entry is gone is absent. The plain-text staging NQN
 sidecar remains compatible with previous versions.
 
 Stage refuses a staging path that already belongs to another or an unknown

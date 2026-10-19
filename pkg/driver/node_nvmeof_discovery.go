@@ -236,6 +236,9 @@ func (s *NodeService) findNVMeDeviceFromSys(ctx context.Context, nqn string) (de
 			continue
 		}
 		identity, readErr := readNVMeControllerNQN(sysClassNVMePath, entry.Name())
+		if errors.Is(readErr, errNVMeControllerRemoved) {
+			continue
+		}
 		if readErr != nil {
 			return "", "", readErr
 		}
