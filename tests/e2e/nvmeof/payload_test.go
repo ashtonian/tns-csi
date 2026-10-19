@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -224,6 +225,31 @@ func volumeFSType(ctx context.Context, run podExec) (string, error) {
 		return "", fmt.Errorf("%w: %s", errMountNotFound, volumeMountPath)
 	}
 	return fsType, nil
+}
+
+// volumeBytes returns the total and non-root-available bytes of the
+// filesystem at volumeMountPath, from its statfs block counts.
+func volumeBytes(ctx context.Context, run podExec) (total, available int64, err error) {
+	out, err := run(ctx, []string{"stat", "-f", "-c", "%b %a %S", volumeMountPath})
+	if err != nil {
+		return 0, 0, fmt.Errorf("statfs %s: %w", volumeMountPath, err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 3 {
+		return 0, 0, fmt.Errorf("%w: stat -f %s: %q", errUnexpectedOutput, volumeMountPath, out)
+	}
+	values := make([]int64, len(fields))
+	for i, field := range fields {
+		values[i], err = strconv.ParseInt(field, 10, 64)
+		if err != nil || values[i] < 0 {
+			return 0, 0, fmt.Errorf("%w: stat -f %s: %q", errUnexpectedOutput, volumeMountPath, out)
+		}
+	}
+	blocks, free, blockSize := values[0], values[1], values[2]
+	if blockSize == 0 || free > blocks || blocks > math.MaxInt64/blockSize {
+		return 0, 0, fmt.Errorf("%w: stat -f %s: %q", errUnexpectedOutput, volumeMountPath, out)
+	}
+	return blocks * blockSize, free * blockSize, nil
 }
 
 func ddBlocks(blockSize, size int64) []string {
