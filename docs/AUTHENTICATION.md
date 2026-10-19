@@ -63,6 +63,17 @@ rather than the credential, for both login methods. The client reports this as
 change that outcome: on 27, where API-key SCRAM exists, it is also limited to
 level 1.
 
+## API endpoint
+
+Configure `wss://<host>:<port>/api/current`. A versioned path such as
+`/api/v25.10.0` selects that older schema. TrueNAS loads its models, and those
+of every intermediate version each call is adapted through, on first use after
+each middleware start. The first login on an older path can therefore outlast
+the client's 10-second authentication timeout. Initial connection
+retries it for about two minutes; if loading takes longer, driver startup fails
+and a restarted driver succeeds once loading completes. `/api/current` and the
+newest versioned path use the preloaded schema.
+
 ## Failures and recovery
 
 Only a legacy boolean `true` or modern object with `response_type="SUCCESS"`
