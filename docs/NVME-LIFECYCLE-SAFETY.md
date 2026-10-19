@@ -136,9 +136,16 @@ keep their existing behavior.
 
 Only settings that differ are written. Each change is logged at Info with the
 device, NQN and old and new values, and counted in
-`tns_csi_nvme_queue_policy_writes_total{setting}`; growth for an already staged
-volume means something else (for example a kernel limits update after reconnect)
-changed the queue and a later check restored it. Each refused step is logged at
+`tns_csi_nvme_queue_policy_writes_total{setting}`. Growth for an already staged
+volume means a queue limits update changed the queue and a later check restored
+it. Every such update recomputes read-ahead from the optimal I/O size: through
+Linux 6.14 it resets read-ahead to twice that size (at least 128 KiB), so an
+explicit value can move either way; from 6.15 it only raises read-ahead to that
+floor; from 6.17 a rotational namespace that reports no optimal size uses twice
+`max_sectors_kb`. A written `max_sectors_kb` survives while the device limit
+allows it. The update can come from a reconnect or rescan outside CSI, or from
+the namespace rescan that a stage reusing an existing connection runs before it
+re-checks policy. Each refused step is logged at
 Warning with the volume, device, NQN and reason, and counted in
 `tns_csi_nvme_policy_refusals_total{reason}`, where `reason` is `identity`,
 `unknown`, `invalid`, `record` or `other`. Caller cancellation is not counted.
