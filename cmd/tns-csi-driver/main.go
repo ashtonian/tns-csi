@@ -35,12 +35,19 @@ var (
 	showVersion               = flag.Bool("show-version", false, "Show version and exit")
 	debug                     = flag.Bool("debug", false, "Enable debug logging (equivalent to -v=4)")
 	enableNVMeDiscovery       = flag.Bool("enable-nvme-discovery", false, "Run nvme discover before nvme connect (default: false, all connection params are known from volume context)")
-	nvmeNodeProfile           = flag.String("nvmeof-node-profile", "", "Path to target-scoped NVMe policy JSON (optional)")
 	maxConcurrentNVMeConnects = flag.Int("max-concurrent-nvme-connects", 5, "Maximum number of concurrent NVMe-oF connect operations per node (limits kernel NVMe subsystem lock contention)")
 	dashboardAddr             = flag.String("dashboard-addr", "", "Address for in-cluster web dashboard (e.g., ':2137', empty = disabled)")
 	dashboardPool             = flag.String("dashboard-pool", "", "ZFS pool for unmanaged volume discovery in dashboard")
 	clusterID                 = flag.String("cluster-id", "", "Unique identifier for this cluster (for multi-cluster TrueNAS sharing)")
 	maxResponseSizeMB         = flag.Int("max-response-size-mb", 10, "Maximum size in MiB of a single TrueNAS API response (WebSocket message); larger responses fail the call")
+
+	// Read only through resolveNVMeNodeProfile, which must tell an explicit empty value from omission.
+	_ = flag.String(nvmeNodeProfileFlagName, "", "Path to target-scoped NVMe policy JSON (optional; overrides "+nvmeNodeProfileEnvName+", and an explicit empty value disables it)")
+)
+
+const (
+	nvmeNodeProfileFlagName = "nvmeof-node-profile"
+	nvmeNodeProfileEnvName  = "TNS_NVME_NODE_PROFILE"
 )
 
 // truenasKeyEnvName holds the TrueNAS API key. Reading it from the environment keeps the
@@ -55,6 +62,18 @@ func resolveAPIKey(flagValue string, getenv func(string) string) string {
 		return v
 	}
 	return strings.TrimSpace(getenv(truenasKeyEnvName))
+}
+
+// resolveNVMeNodeProfile returns the supplied --nvmeof-node-profile value, even when empty,
+// otherwise the environment's profile path.
+func resolveNVMeNodeProfile(flags *flag.FlagSet, getenv func(string) string) string {
+	profile := getenv(nvmeNodeProfileEnvName)
+	flags.Visit(func(supplied *flag.Flag) {
+		if supplied.Name == nvmeNodeProfileFlagName {
+			profile = supplied.Value.String()
+		}
+	})
+	return profile
 }
 
 func main() {
@@ -100,14 +119,8 @@ func main() {
 	klog.V(4).Infof("Driver: %s", *driverName)
 	klog.V(4).Infof("Node ID: %s", *nodeID)
 
-	profilePath := os.Getenv("TNS_NVME_NODE_PROFILE")
-	flag.Visit(func(selected *flag.Flag) {
-		if selected.Name == "nvmeof-node-profile" {
-			profilePath = *nvmeNodeProfile
-		}
-	})
 	drv, err := driver.NewDriver(driver.Config{
-		NVMeNodeProfilePath:       profilePath,
+		NVMeNodeProfilePath:       resolveNVMeNodeProfile(flag.CommandLine, os.Getenv),
 		DriverName:                *driverName,
 		Version:                   version,
 		NodeID:                    *nodeID,
