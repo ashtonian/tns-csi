@@ -21,6 +21,10 @@ var (
 	errMountNotFound    = errors.New("mount point not found in /proc/mounts")
 )
 
+// volumeMountPath is where filesystem-mode specs mount their volume, so the
+// mount helpers below always inspect that path.
+const volumeMountPath = "/data"
+
 // podExec runs argv directly in a test pod, without a shell, and returns its
 // trimmed stdout.
 type podExec func(ctx context.Context, argv []string) (string, error)
@@ -202,9 +206,9 @@ func blockdevInt(ctx context.Context, run podExec, query, device string) (int64,
 	return value, nil
 }
 
-// mountedFSType returns the filesystem type of mountPoint from the pod's
+// volumeFSType returns the filesystem type at volumeMountPath from the pod's
 // /proc/mounts. The last entry wins because later mounts shadow earlier ones.
-func mountedFSType(ctx context.Context, run podExec, mountPoint string) (string, error) {
+func volumeFSType(ctx context.Context, run podExec) (string, error) {
 	out, err := run(ctx, []string{"cat", "/proc/mounts"})
 	if err != nil {
 		return "", fmt.Errorf("read /proc/mounts: %w", err)
@@ -212,12 +216,12 @@ func mountedFSType(ctx context.Context, run podExec, mountPoint string) (string,
 	fsType := ""
 	for line := range strings.Lines(out) {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[1] == mountPoint {
+		if len(fields) >= 3 && fields[1] == volumeMountPath {
 			fsType = fields[2]
 		}
 	}
 	if fsType == "" {
-		return "", fmt.Errorf("%w: %s", errMountNotFound, mountPoint)
+		return "", fmt.Errorf("%w: %s", errMountNotFound, volumeMountPath)
 	}
 	return fsType, nil
 }

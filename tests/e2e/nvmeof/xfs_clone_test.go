@@ -25,9 +25,8 @@ var _ = Describe("NVMe-oF XFS Clone And Restore", func() {
 		sourcePVCName     = "test-pvc-nvmeof-xfs-source"
 		sourcePodName     = "test-pod-nvmeof-xfs-source"
 		snapshotName      = "test-snap-nvmeof-xfs-source"
-		mountPath         = "/data"
-		payloadPath       = mountPath + "/payload.bin"
-		copyOnlyPath      = mountPath + "/copy-only.bin"
+		payloadPath       = volumeMountPath + "/payload.bin"
+		copyOnlyPath      = volumeMountPath + "/copy-only.bin"
 		payloadSize       = 8 << 20
 		podTimeout        = 360 * time.Second
 	)
@@ -82,7 +81,7 @@ var _ = Describe("NVMe-oF XFS Clone And Restore", func() {
 		_, err = f.CreatePod(ctx, framework.PodOptions{
 			Name:      sourcePodName,
 			PVCName:   sourcePVCName,
-			MountPath: mountPath,
+			MountPath: volumeMountPath,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		err = f.K8s.WaitForPodReady(ctx, sourcePodName, podTimeout)
@@ -121,7 +120,7 @@ var _ = Describe("NVMe-oF XFS Clone And Restore", func() {
 			_, err = f.CreatePod(ctx, framework.PodOptions{
 				Name:      copied.podName,
 				PVCName:   copied.pvcName,
-				MountPath: mountPath,
+				MountPath: volumeMountPath,
 			})
 			Expect(err).NotTo(HaveOccurred())
 			err = f.K8s.WaitForPodReady(ctx, copied.podName, podTimeout)
@@ -129,7 +128,7 @@ var _ = Describe("NVMe-oF XFS Clone And Restore", func() {
 
 			By("Verifying " + copied.pvcName + " is XFS with the source payload")
 			run := podRunner(f, copied.podName)
-			fsType, fsErr := mountedFSType(ctx, run, mountPath)
+			fsType, fsErr := volumeFSType(ctx, run)
 			Expect(fsErr).NotTo(HaveOccurred())
 			Expect(fsType).To(Equal("xfs"))
 			err = verifyFilePayload(ctx, run, payloadPath, written)

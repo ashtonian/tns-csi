@@ -21,7 +21,6 @@ var _ = Describe("NVMe-oF XFS Integrity", func() {
 		pvcName          = "test-pvc-nvmeof-xfs-integrity"
 		writerPodName    = "test-pod-nvmeof-xfs-writer"
 		readerPodName    = "test-pod-nvmeof-xfs-reader"
-		mountPath        = "/data"
 		podTimeout       = 360 * time.Second
 	)
 
@@ -71,7 +70,7 @@ var _ = Describe("NVMe-oF XFS Integrity", func() {
 		_, err = f.CreatePod(ctx, framework.PodOptions{
 			Name:      writerPodName,
 			PVCName:   pvcName,
-			MountPath: mountPath,
+			MountPath: volumeMountPath,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		err = f.K8s.WaitForPodReady(ctx, writerPodName, podTimeout)
@@ -79,7 +78,7 @@ var _ = Describe("NVMe-oF XFS Integrity", func() {
 
 		By("Verifying the volume is mounted as XFS")
 		writer := podRunner(f, writerPodName)
-		fsType, err := mountedFSType(ctx, writer, mountPath)
+		fsType, err := volumeFSType(ctx, writer)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fsType).To(Equal("xfs"))
 
@@ -87,7 +86,7 @@ var _ = Describe("NVMe-oF XFS Integrity", func() {
 		paths := make([]string, len(payloadSizes))
 		written := make([]payloadDigest, len(payloadSizes))
 		for i, size := range payloadSizes {
-			paths[i] = fmt.Sprintf("%s/integrity-%d.bin", mountPath, size)
+			paths[i] = fmt.Sprintf("%s/integrity-%d.bin", volumeMountPath, size)
 			written[i], err = writeFilePayload(ctx, writer, paths[i], size)
 			Expect(err).NotTo(HaveOccurred())
 		}
@@ -102,7 +101,7 @@ var _ = Describe("NVMe-oF XFS Integrity", func() {
 		_, err = f.CreatePod(ctx, framework.PodOptions{
 			Name:      readerPodName,
 			PVCName:   pvcName,
-			MountPath: mountPath,
+			MountPath: volumeMountPath,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		err = f.K8s.WaitForPodReady(ctx, readerPodName, podTimeout)
@@ -110,7 +109,7 @@ var _ = Describe("NVMe-oF XFS Integrity", func() {
 
 		By("Verifying the remounted volume is XFS")
 		reader := podRunner(f, readerPodName)
-		fsType, err = mountedFSType(ctx, reader, mountPath)
+		fsType, err = volumeFSType(ctx, reader)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fsType).To(Equal("xfs"))
 
