@@ -13,6 +13,9 @@ import (
 // sysBlockPath is the sysfs directory listing block devices. Tests point it elsewhere.
 var sysBlockPath = "/sys/block"
 
+// sysDevBlockPath indexes block devices by major:minor, including those without a name.
+var sysDevBlockPath = "/sys/dev/block"
+
 // errNVMeAmbiguousNamespace means several namespace devices match one NQN and none is NSID 1.
 var errNVMeAmbiguousNamespace = errors.New("ambiguous NVMe namespace devices for NQN")
 

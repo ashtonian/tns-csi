@@ -34,6 +34,7 @@ func TestLookupMount(t *testing.T) {
 		target     string
 		wantSource string
 		wantFSType string
+		wantDevice string
 		wantOK     bool
 	}{
 		{
@@ -42,6 +43,7 @@ func TestLookupMount(t *testing.T) {
 			wantOK:     true,
 			wantSource: "10.0.0.5:/mnt/tank/pvc-1",
 			wantFSType: "nfs4",
+			wantDevice: "0:45",
 		},
 		{
 			name:       "trailing slash is cleaned",
@@ -49,6 +51,7 @@ func TestLookupMount(t *testing.T) {
 			wantOK:     true,
 			wantSource: "10.0.0.5:/mnt/tank/pvc-1",
 			wantFSType: "nfs4",
+			wantDevice: "0:45",
 		},
 		{
 			name:       "stacked mounts report the topmost (last) entry",
@@ -56,6 +59,7 @@ func TestLookupMount(t *testing.T) {
 			wantOK:     true,
 			wantSource: "/dev/nvme1n1",
 			wantFSType: "xfs",
+			wantDevice: "259:2",
 		},
 		{
 			name:       "octal-escaped spaces are decoded",
@@ -63,6 +67,7 @@ func TestLookupMount(t *testing.T) {
 			wantOK:     true,
 			wantSource: "//nas/share one",
 			wantFSType: "cifs",
+			wantDevice: "0:46",
 		},
 		{
 			name:   "not a mount point",
@@ -82,8 +87,11 @@ func TestLookupMount(t *testing.T) {
 			if ok != tt.wantOK {
 				t.Fatalf("lookupMount() ok = %v, want %v", ok, tt.wantOK)
 			}
-			if entry.Source != tt.wantSource || entry.FSType != tt.wantFSType {
-				t.Errorf("lookupMount() = %+v, want source %q fstype %q", entry, tt.wantSource, tt.wantFSType)
+			if tt.wantOK && (entry.Source != tt.wantSource || entry.FSType != tt.wantFSType || entry.Device != tt.wantDevice) {
+				t.Errorf("lookupMount() = %+v, want source %q fstype %q device %q", entry, tt.wantSource, tt.wantFSType, tt.wantDevice)
+			}
+			if !tt.wantOK && entry != (Entry{}) {
+				t.Errorf("lookupMount() = %+v for an unmounted target", entry)
 			}
 		})
 	}

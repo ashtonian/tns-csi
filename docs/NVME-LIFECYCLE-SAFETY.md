@@ -13,6 +13,12 @@ namespace. A raw-block staging path may be absent, the empty directory kubelet
 creates before NodeStageVolume, or a link to a namespace with the requested NQN;
 a populated directory, regular file or other link is refused.
 
+After controller loss or a namespace re-export, a staging mount or raw staging link
+can outlive its block device. Unstage removes such a stale mount or link when the
+mounted device number, or the linked device, no longer exists, then applies the
+normal namespace-user checks before disconnecting. A mounted device that still
+exists must match the volume's NQN; otherwise unstage is refused.
+
 Unstage depends on completed CSI unpublish ordering. A negative mount scan does
 not exclude arbitrary external mounts or open raw-device handles and does not
 provide fencing. Intentional raw-block RWX remains supported. There is no

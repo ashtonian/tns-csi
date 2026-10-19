@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -379,12 +380,15 @@ func (s *NodeService) unstageNVMeOFVolume(ctx context.Context, req *csi.NodeUnst
 		return nil, nvmeLifecycleError(ctx, "cannot verify staging mount", err)
 	}
 	if mounted {
-		if err := verifyNVMeNQN(entry.Source, nqn); err != nil {
+		if err := verifyNVMeStagingMount(entry, nqn); err != nil {
 			return nil, nvmeLifecycleError(ctx, "staging source identity conflict", err)
 		}
 	} else if info, statErr := os.Lstat(stagingTargetPath); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
 		device, resolveErr := filepath.EvalSymlinks(stagingTargetPath)
-		if resolveErr != nil {
+		if errors.Is(resolveErr, fs.ErrNotExist) {
+			// The linked device was removed; the teardown checks below cover what remains.
+			klog.Warningf("Raw staging link %s points to a removed device; continuing NVMe unstage", stagingTargetPath)
+		} else if resolveErr != nil {
 			present, presenceErr := nvmeNQNPresent(sysClassNVMePath, nqn)
 			if presenceErr != nil || present {
 				return nil, nvmeLifecycleError(ctx, "cannot verify raw staging source", errors.Join(resolveErr, presenceErr))
@@ -420,6 +424,28 @@ func (s *NodeService) unstageNVMeOFVolume(ctx context.Context, req *csi.NodeUnst
 	klog.Infof("Disconnected NVMe-oF volume %s from target %s", volumeID, nqn)
 
 	return &csi.NodeUnstageVolumeResponse{}, nil
+}
+
+// verifyNVMeStagingMount checks that a mounted staging source is the volume's namespace.
+// After controller loss or namespace re-export the mount can outlive its block device.
+// A device number that no longer exists cannot belong to another namespace, so that
+// stale mount may be unmounted; a mounted device that still exists must match the NQN.
+func verifyNVMeStagingMount(entry mount.Entry, nqn string) error {
+	current, err := readSysfsValue(filepath.Join(sysBlockPath, filepath.Base(entry.Source), "dev"))
+	if err == nil && current == entry.Device {
+		return verifyNVMeNQN(entry.Source, nqn)
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %s: %w", ErrNVMeDiscoveryUnknown, entry.Source, err)
+	}
+	if !validNVMeDeviceNumber(entry.Device) {
+		return fmt.Errorf("%w: staging mount of %s has no device number", ErrNVMeDiscoveryUnknown, entry.Source)
+	}
+	if _, statErr := os.Stat(filepath.Join(sysDevBlockPath, entry.Device)); !errors.Is(statErr, fs.ErrNotExist) {
+		return errors.Join(ErrNVMeIdentityConflict, statErr)
+	}
+	klog.Warningf("Staging mount source %s (%s) no longer exists; unmounting the stale mount", entry.Source, entry.Device)
+	return nil
 }
 
 // deriveNQNFromStagingPath derives the NVMe-oF NQN from Linux mount/device metadata.
