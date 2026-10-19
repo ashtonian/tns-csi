@@ -252,6 +252,74 @@ func volumeBytes(ctx context.Context, run podExec) (total, available int64, err 
 	return blocks * blockSize, free * blockSize, nil
 }
 
+// queueLimits are block-queue attributes of the device behind volumeMountPath.
+type queueLimits struct {
+	device           string // major:minor
+	maxSectorsKB     int64
+	maxHWSectorsKB   int64
+	readAheadKB      int64
+	logicalBlockSize int64
+}
+
+// volumeQueueLimits reads the queue attributes of the block device backing
+// volumeMountPath. The device comes from the pod's mountinfo and the values
+// from the node's read-only sysfs, which unprivileged containers can read.
+func volumeQueueLimits(ctx context.Context, run podExec) (queueLimits, error) {
+	out, err := run(ctx, []string{"cat", "/proc/self/mountinfo"})
+	if err != nil {
+		return queueLimits{}, fmt.Errorf("read mountinfo: %w", err)
+	}
+	limits := queueLimits{}
+	for line := range strings.Lines(out) {
+		// Fields: mount ID, parent ID, major:minor, root, mount point, ...
+		// The last entry wins because later mounts shadow earlier ones.
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && fields[4] == volumeMountPath {
+			limits.device = fields[2]
+		}
+	}
+	if limits.device == "" {
+		return queueLimits{}, fmt.Errorf("%w: %s", errMountNotFound, volumeMountPath)
+	}
+	major, minor, ok := strings.Cut(limits.device, ":")
+	if !ok || !isDecimal(major) || !isDecimal(minor) || major == "0" {
+		return queueLimits{}, fmt.Errorf("%w: %s is not backed by a block device: %s", errUnexpectedOutput, volumeMountPath, limits.device)
+	}
+
+	queue := "/sys/dev/block/" + limits.device + "/queue/"
+	for _, attribute := range []struct {
+		value *int64
+		name  string
+	}{
+		{&limits.maxSectorsKB, "max_sectors_kb"},
+		{&limits.maxHWSectorsKB, "max_hw_sectors_kb"},
+		{&limits.readAheadKB, "read_ahead_kb"},
+		{&limits.logicalBlockSize, "logical_block_size"},
+	} {
+		value, readErr := run(ctx, []string{"cat", queue + attribute.name})
+		if readErr != nil {
+			return queueLimits{}, fmt.Errorf("read %s: %w", queue+attribute.name, readErr)
+		}
+		*attribute.value, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || *attribute.value < 0 {
+			return queueLimits{}, fmt.Errorf("%w: %s: %q", errUnexpectedOutput, queue+attribute.name, value)
+		}
+	}
+	return limits, nil
+}
+
+func isDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func ddBlocks(blockSize, size int64) []string {
 	return []string{
 		"bs=" + strconv.FormatInt(blockSize, 10),
