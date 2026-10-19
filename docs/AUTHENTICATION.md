@@ -56,11 +56,18 @@ implemented: policies requiring those mechanisms fail with a safe error instead
 of changing server policy or trying legacy login. Server release and requested
 API version both matter; older API schemas can normalize newer denial results.
 
+API key login requires the server's default authenticator assurance level 1.
+Levels 2 and 3 permit no API-key mechanism, so the server rejects the mechanism
+rather than the credential, for both login methods. The client reports this as
+`ErrAuthenticationMechanismDisallowed` and stops. Implementing SCRAM would not
+change that outcome: on 27, where API-key SCRAM exists, it is also limited to
+level 1.
+
 ## Failures and recovery
 
 Only a legacy boolean `true` or modern object with `response_type="SUCCESS"`
 authenticates. Rejected, expired, denied, malformed or unsupported login responses
-produce sanitized errors. A missing legacy method asks for the key owner's
+and mechanisms disallowed by server policy produce sanitized errors. A missing legacy method asks for the key owner's
 username; an unavailable modern method asks for the server/API configuration to
 be checked. There is no fallback after explicit modern configuration.
 

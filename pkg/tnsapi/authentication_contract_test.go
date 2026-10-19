@@ -301,26 +301,51 @@ func TestLegacyResultShapes(t *testing.T) {
 func TestAuthStructuredErrorRedaction(t *testing.T) {
 	logs := captureAuthLogs(t)
 	const sentinel = "ERROR_REASON_EXTRA_TRACE_SENTINEL"
+	// ENOTSUP is what Linux middleware sends for an assurance-level mechanism
+	// rejection; EOPNOTSUPP is the same errno under its other name.
+	names := []string{"ENOMETHOD", "EACCES", "ENOTAUTHENTICATED", "ENOTSUP", "EOPNOTSUPP", "UNKNOWN"}
 	for _, modern := range []bool{false, true} {
-		for _, direct := range []bool{false, true} {
-			for _, name := range []string{"ENOMETHOD", "EACCES", "ENOTAUTHENTICATED", "UNKNOWN"} {
-				t.Run(fmt.Sprintf("%s/modern=%v/direct=%v", name, modern, direct), func(t *testing.T) {
+		for _, path := range []string{"initial", "session", "direct"} {
+			for _, name := range names {
+				t.Run(fmt.Sprintf("%s/modern=%v/%s", name, modern, path), func(t *testing.T) {
 					server := newMockWSServer()
 					t.Cleanup(server.Close)
-					var calls atomic.Int32
+					var authCalls, queries atomic.Int32
 					server.handler = func(conn *websocket.Conn) {
 						serveMockRequests(conn, func(req Request) []Response {
-							calls.Add(1)
+							if !isAuthMethod(req.Method) {
+								if path != "session" || req.Method != "pool.dataset.query" || queries.Add(1) != 1 {
+									t.Errorf("unexpected RPC %s", req.Method)
+								}
+								return []Response{{ID: req.ID, Error: enotauthenticatedError()}}
+							}
 							assertAuthRequest(t, req, modern)
+							if authCalls.Add(1) == 1 && path == "session" {
+								success := `true`
+								if modern {
+									success = `{"response_type":"SUCCESS"}`
+								}
+								return []Response{{ID: req.ID, Result: json.RawMessage(success)}}
+							}
 							return []Response{{ID: req.ID, Error: &Error{Code: -32001, Message: sentinel,
 								Data: &ErrorData{ErrorName: name, Reason: sentinel, Extra: sentinel, Trace: &ErrorTrace{Repr: sentinel}}}}}
 						})
 					}
 					var err error
-					if direct {
+					switch path {
+					case "direct":
 						err = directAuthTestClient(t, server.URL(), modern).authenticateDirect()
-					} else {
+					case "initial":
 						_, err = NewClient(server.URL(), "fixture-key", false, authTestOptions(modern)...)
+					case "session":
+						c, newErr := NewClient(server.URL(), "fixture-key", false, authTestOptions(modern)...)
+						if newErr != nil {
+							t.Fatal(newErr)
+						}
+						t.Cleanup(func() { cleanupClient(c) })
+						ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+						defer cancel()
+						err = c.Call(ctx, "pool.dataset.query", nil, nil)
 					}
 					want := ErrAuthenticationFailed
 					switch name {
@@ -333,9 +358,15 @@ func TestAuthStructuredErrorRedaction(t *testing.T) {
 						want = ErrAuthenticationDenied
 					case "ENOTAUTHENTICATED":
 						want = ErrAuthenticationRejected
+					case "ENOTSUP", "EOPNOTSUPP":
+						want = ErrAuthenticationMechanismDisallowed
 					}
-					if !errors.Is(err, want) || calls.Load() != 1 {
-						t.Fatalf("error=%v calls=%d", err, calls.Load())
+					wantCalls := int32(1)
+					if path == "session" {
+						wantCalls = 2
+					}
+					if !errors.Is(err, want) || authCalls.Load() != wantCalls {
+						t.Fatalf("error=%v auth calls=%d; want %v and %d", err, authCalls.Load(), want, wantCalls)
 					}
 					for current := err; current != nil; current = errors.Unwrap(current) {
 						if strings.Contains(fmt.Sprintf("%+v", current), sentinel) {

@@ -13,14 +13,15 @@ const methodAuthLoginEx = "auth.login_ex"
 
 // Authentication failures contain no server-provided text or credentials.
 var (
-	ErrAuthenticationExpired           = errors.New("authentication credential expired: renew the API key")
-	ErrAuthenticationDenied            = errors.New("authentication denied: check account API access and server policy")
-	ErrAuthenticationUnsupported       = errors.New("authentication requires an unsupported challenge or redirect")
-	ErrAuthenticationMalformed         = errors.New("invalid authentication response")
-	ErrAuthenticationUsernameRequired  = errors.New("legacy authentication unavailable: configure the API key owner's username")
-	ErrAuthenticationMethodUnavailable = errors.New("modern authentication unavailable: check the server version and API endpoint")
-	ErrAuthenticationFailed            = errors.New("authentication failed: check server authentication configuration")
-	ErrTLSVerification                 = errors.New("TLS certificate verification failed: check the hostname and trusted CA")
+	ErrAuthenticationExpired             = errors.New("authentication credential expired: renew the API key")
+	ErrAuthenticationDenied              = errors.New("authentication denied: check account API access and server policy")
+	ErrAuthenticationUnsupported         = errors.New("authentication requires an unsupported challenge or redirect")
+	ErrAuthenticationMalformed           = errors.New("invalid authentication response")
+	ErrAuthenticationUsernameRequired    = errors.New("legacy authentication unavailable: configure the API key owner's username")
+	ErrAuthenticationMethodUnavailable   = errors.New("modern authentication unavailable: check the server version and API endpoint")
+	ErrAuthenticationMechanismDisallowed = errors.New("API key authentication disallowed by the server's authenticator assurance level")
+	ErrAuthenticationFailed              = errors.New("authentication failed: check server authentication configuration")
+	ErrTLSVerification                   = errors.New("TLS certificate verification failed: check the hostname and trusted CA")
 )
 
 // WithUsername selects login_ex using the API key owner's username. An empty
@@ -81,7 +82,7 @@ func isAuthenticationError(err error) bool {
 		ErrAuthenticationRejected, ErrAuthenticationExpired, ErrAuthenticationDenied,
 		ErrAuthenticationUnsupported, ErrAuthenticationMalformed,
 		ErrAuthenticationUsernameRequired, ErrAuthenticationMethodUnavailable,
-		ErrAuthenticationFailed, ErrResponseIDMismatch,
+		ErrAuthenticationMechanismDisallowed, ErrAuthenticationFailed, ErrResponseIDMismatch,
 	} {
 		if errors.Is(err, failure) {
 			return true
@@ -105,6 +106,10 @@ func sanitizeAuthenticationError(method string, err error) error {
 			return ErrAuthenticationMethodUnavailable
 		case name == "EACCES" || name == "EPERM":
 			return ErrAuthenticationDenied
+		// Middleware rejects mechanisms excluded by its assurance level with
+		// CallError(EOPNOTSUPP); Linux Python names that errno ENOTSUP.
+		case name == "ENOTSUP" || name == "EOPNOTSUPP":
+			return ErrAuthenticationMechanismDisallowed
 		case apiErr.Code == 401 || name == errNameNotAuthenticated:
 			return ErrAuthenticationRejected
 		default:
