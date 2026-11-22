@@ -25,6 +25,8 @@ concurrency:
 jobs:
   build:
     name: Generate Dashboard
+    # GitHub Pages is configured only upstream; in a fork every deploy fails.
+    if: github.repository == 'fenio/tns-csi'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
