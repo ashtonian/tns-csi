@@ -15,8 +15,8 @@ jobs:
   sonarqube:
     name: SonarQube Scan
     # Fork PRs cannot access SONAR_TOKEN. Never expose it via pull_request_target;
-    # scan trusted same-repository PRs and main instead.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # scan trusted same-repository PRs and main instead. Forks have no token.
+    if: github.repository == 'fenio/tns-csi' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
